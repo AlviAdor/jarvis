@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+- Any language: speech that isn't confident English goes to Gemini, which understands most languages, and Jarvis answers in the language you used; typed messages work the same way
+- Speaks each language properly: replies use a Mac voice for that language, or Gemini's multilingual voice when none is installed, with a one-click way to get the missing voice
+- Helps with anything: what Jarvis knows about you personalises answers but never limits them; real questions (reasoning, advice, writing, anything long) go to a stronger model instead of the quickest one
+- Effort setting (Low, Balanced, High, Max) for thinking depth, model strength, answer length and steps, also in the composer's model menu
+- Usage saver: answers on this Mac whenever possible, Lite models only, the Mac voice, no background requests and shorter context, to stretch the free allowance
+- Works without the cloud: when Gemini is out of requests, offline or not set up, the local model answers instead of an error
+- Faster: answers appear as Gemini writes them, web answers start speaking at the first sentence, the connection is warmed while you talk, finished sentences end sooner, and long earlier answers are trimmed before being sent again
+- Gemini voice requests now count in today's usage
+- New app icon: a particle globe with a tilted orbital ring in a glass squircle; the orb's ring in the app matches it
+
 ## 0.9.0
 - Calmer orb: heavier work adds a gentle lift to the pace instead of a rush, particles swell softly rather than jump, every change eases over a few seconds, and it runs at 30 frames a second at rest for smoother motion
 - Voice match no longer locks you out: if there's too little audio to judge, the request goes through; the voiceprint keeps all your samples and compares against the closest ones, sets its threshold from how consistent your own voice is, and keeps learning from confident matches and push-to-talk requests

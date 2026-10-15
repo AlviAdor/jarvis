@@ -31,6 +31,12 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 - Search, Think and Screen switches, a model picker, and formatted answers with code blocks
 - Read aloud, copy, try again, edit and share any answer
 
+**Any language**
+- Talk or type in almost any language; Jarvis understands it (through Gemini) and answers and speaks in the same language
+
+**Effort and usage**
+- Effort from Low to Max controls thinking depth, model strength and answer length; the usage saver stretches the free Gemini allowance; when the cloud isn't available, the local model answers
+
 **Remembers you**
 - Keeps the conversation across restarts, so follow-ups like "and tomorrow?" just work
 - Gets to know you by talking during setup: it asks out loud, you answer, and it learns your voice from those answers. It keeps learning from what you mention, all stored on this Mac
