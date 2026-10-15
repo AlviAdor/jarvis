@@ -106,6 +106,8 @@ final class AppModel: ObservableObject {
     var openMainWindow: (() -> Void)?
     private var lastLearn = Date.distantPast
     private var voiceFallbackNoted = Date.distantPast
+    private var voicesOffered = Set<String>()
+    private var lastWarm = Date.distantPast
     private var systemStrained = false
     private var job: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
@@ -166,11 +168,12 @@ final class AppModel: ObservableObject {
             Task { @MainActor in guard let self else { return }; self.telemetry.setActive(self.wantsTelemetry) }
         }.store(in: &bag)
 
-        voice.onCommand = { [weak self] text in self?.submit(text) }
+        voice.onCommand = { [weak self] text in self?.heard(text) }
         // Warm the on-device model only once the speech is for Jarvis, not for every sound in the room.
         voice.onWakeHeard = { [weak self] in
             guard let self else { return }
             LocalBrain.shared.prewarm(self.store.value)
+            self.warmCloud()
         }
         voice.onRejected = { [weak self] heard, vector in
             guard let self else { return }
@@ -213,6 +216,14 @@ final class AppModel: ObservableObject {
             if !speaking, self.phase == .speaking { self.phase = .idle }
         }
         speaker.knownModels = { [weak self] in self?.store.value.knownModels ?? [] }
+        speaker.onCloudUse = { [weak self] in self?.usage.add(Usage()) }
+        speaker.onMissingVoice = { [weak self] lang in
+            guard let self, !self.voicesOffered.contains(lang) else { return }
+            self.voicesOffered.insert(lang)
+            self.flash("There's no \(Language.name(lang)) voice on this Mac yet, so it may sound off.", action: "Get the voice") {
+                NSWorkspace.shared.open(Links.spokenContent)
+            }
+        }
         speaker.onFallback = { [weak self] why in
             guard let self else { return }
             self.log("Gemini voice unavailable, used the Mac voice: \(why)")
@@ -393,8 +404,23 @@ final class AppModel: ObservableObject {
         refreshOverlay()
     }
 
+    /// Opens the connection to Gemini while the user is still talking, so the answer starts sooner.
+    /// Listing models is free and doesn't count against any quota.
+    func warmCloud() {
+        let key = store.geminiKey
+        guard !key.isEmpty, Date().timeIntervalSince(lastWarm) > 45 else { return }
+        lastWarm = Date()
+        Task.detached(priority: .utility) {
+            var req = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1")!)
+            req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+            req.timeoutInterval = 5
+            _ = try? await URLSession.shared.data(for: req)
+        }
+    }
+
     func pushToTalk() {
         guard !needsOnboarding else { showWindow(); return }
+        warmCloud()
         speaker.stop()
         voice.suspended = false
         voice.arm(push: true)
@@ -423,6 +449,26 @@ final class AppModel: ObservableObject {
         typed = ""
         job?.cancel()
         job = Task { await handle(t, files: files) }
+    }
+
+    static let spokenTask = """
+    My request is in the attached audio and may be in any language. Do what I ask. Start your reply with one line in exactly this form: Heard: <my words, in the language I spoke>. Then answer in the language I spoke.
+    """
+
+    /// A spoken request. Confident English is handled as text; anything else goes to Gemini as audio,
+    /// which understands most languages, so you can talk to Jarvis in yours.
+    private func heard(_ text: String) {
+        let conf = voice.lastConfidence
+        if store.value.anyLanguage, !store.geminiKey.isEmpty, conf > 0, conf < 0.5 || text.count < 2,
+           let wav = voice.lastRecordingWAV(), wav.count > 8_000 {
+            log(String(format: "Speech wasn't clear English (%.0f%% sure), sending the audio to Gemini", conf * 100))
+            guard !needsOnboarding else { return }
+            attachments = []
+            job?.cancel()
+            job = Task { await handle(Self.spokenTask, files: [Attachment.speech(wav)], spoken: true) }
+            return
+        }
+        submit(text)
     }
 
     /// Asks the last question again.
@@ -519,14 +565,16 @@ final class AppModel: ObservableObject {
 
     // MARK: Pipeline
 
-    private func handle(_ text: String, files: [Attachment] = []) async {
+    private func handle(_ text: String, files: [Attachment] = [], spoken: Bool = false) async {
         guard termsAccepted else { showWindow(); return }
         let began = Date()
         phase = .thinking
-        question = text
+        question = spoken ? "…" : text
         lastAttachments = files
         answer = ""
         answerMarkdown = ""
+        streamSpoken = 0
+        streamSpokenText = ""
         answerSource = ""
         steps = []
         overlayText = text
@@ -567,7 +615,8 @@ final class AppModel: ObservableObject {
                 }
                 mode = .chat
             }
-        } else if !followUp, mode == nil || mode == .chat, !Router.needsTools(text) {
+        } else if !followUp, mode == nil || mode == .chat, !Router.needsTools(text),
+                  s.usageSaver || (!Router.isSubstantive(text) && Language.isEnglish(text)) {
             // Small talk and quick questions are answered on this Mac: free, private and fast.
             switch await answerLocally(text, began: began) {
             case .answered: return
@@ -576,8 +625,13 @@ final class AppModel: ObservableObject {
             }
         }
 
-        guard !store.geminiKey.isEmpty || !store.claudeKey.isEmpty else {
-            reply("I need a Gemini API key for that. You can add one in Settings.")
+        // No cloud model can take this right now (no key, or every model is out of free requests): answer here.
+        let cloudReady = !store.claudeKey.isEmpty || (!store.geminiKey.isEmpty &&
+            router.chain(for: mode ?? .chat, settings: s).contains { QuotaBook.shared.usable($0) })
+        if !cloudReady {
+            if files.isEmpty, mode != .screen, await answerLocally(text, began: began, solo: true) == .answered { return }
+            reply(store.geminiKey.isEmpty ? "I need a Gemini API key for that. You can add one in Settings."
+                                          : Friendly.allResting(router.chain(for: mode ?? .chat, settings: s)))
             return
         }
         guard !usage.overCap(s.dailyRequestCap) else {
@@ -609,8 +663,19 @@ final class AppModel: ObservableObject {
             while true {
                 phase = m == .screen ? .acting : .thinking
                 let tools = makeTools(s, mcp: mcpTools)
-                (outcome, provider) = try await runAgent(text, files: files, mode: m, tier: override ?? router.tier(for: m, settings: s),
-                                                         chain: router.chain(for: m, settings: s, from: override),
+                // Effort decides how strong a model everyday questions get; the usage saver keeps to Lite.
+                var deep: Tier?
+                if m == .chat, s.modelChoice == "auto", !s.usageSaver {
+                    let substantive = Router.isSubstantive(text) || !files.isEmpty
+                    switch s.effort {
+                    case "low": deep = nil
+                    case "high": deep = .flash
+                    case "max": deep = substantive ? .pro : .flash
+                    default: deep = substantive ? .flash : nil
+                    }
+                }
+                (outcome, provider) = try await runAgent(text, files: files, mode: m, tier: override ?? deep ?? router.tier(for: m, settings: s),
+                                                         chain: router.chain(for: m, settings: s, from: override ?? deep),
                                                          client: client, tools: tools, settings: s, log: logger)
                 // The model decided this needs the screen: run it again with eyes and hands.
                 if outcome.needsScreen, !handedToScreen, !KillSwitch.shared.tripped {
@@ -631,12 +696,24 @@ final class AppModel: ObservableObject {
                 }
                 break
             }
-            let said = files.isEmpty ? text : text + " " + files.map(\.mention).joined(separator: " ")
-            record(said, outcome.summary, source: "\(provider) · \(Self.elapsed(began))", mode: m.rawValue)
+            var answerText = outcome.summary
+            var said = files.isEmpty ? text : text + " " + files.map(\.mention).joined(separator: " ")
+            if spoken {
+                let split = Language.splitHeard(outcome.summary)
+                said = split.heard ?? "(spoken request)"
+                question = said
+                answerText = split.rest.isEmpty ? outcome.summary : split.rest
+            }
+            record(said, answerText, source: "\(provider) · \(Self.elapsed(began))", mode: m.rawValue)
         } catch is CancellationError {
             phase = .idle
         } catch {
-            reply(Friendly.message(error))
+            // The cloud failed (offline, limits, an outage): answer on this Mac rather than leave you waiting.
+            if !spoken, files.isEmpty, mode != .screen, await answerLocally(text, began: began, solo: true) == .answered {
+                log("Cloud failed, answered on this Mac: \(Friendly.message(error))")
+            } else {
+                reply(Friendly.message(error))
+            }
         }
         comeBack()
     }
@@ -706,14 +783,14 @@ final class AppModel: ObservableObject {
         return "Changed \(name) to \(v)."
     }
 
-    private enum LocalResult { case answered, escalate(Mode), unavailable }
+    private enum LocalResult: Equatable { case answered, escalate(Mode), unavailable }
 
     /// Streams the local model's answer and starts speaking at the first full sentence.
-    private func answerLocally(_ text: String, began: Date, context: String? = nil) async -> LocalResult {
+    private func answerLocally(_ text: String, began: Date, context: String? = nil, solo: Bool = false) async -> LocalResult {
         let s = store.value
         let profile = memory.profile(name: s.userName)
         let ctx = [profile.isEmpty ? nil : "What you know about the user:\n" + profile, context].compactMap { $0 }.joined(separator: "\n\n")
-        guard let (stream, engine) = await LocalBrain.shared.stream(text, history: chatHistory(), settings: s, context: ctx.isEmpty ? nil : ctx) else {
+        guard let (stream, engine) = await LocalBrain.shared.stream(text, history: chatHistory(), settings: s, context: ctx.isEmpty ? nil : ctx, solo: solo) else {
             return .unavailable
         }
         let streamSpeech = s.speakReplies && s.voiceEngine != "gemini"
@@ -724,7 +801,7 @@ final class AppModel: ObservableObject {
             for try await partial in stream {
                 if Task.isCancelled { return .answered }
                 latest = partial
-                if !decided {
+                if !decided, !solo {
                     switch LocalBrain.verdict(partial, finished: false) {
                     case .escalate(let m)?:
                         log("On-device model handed this to the cloud (\(m.rawValue))")
@@ -743,13 +820,13 @@ final class AppModel: ObservableObject {
             log("On-device model failed: \(error.localizedDescription)")
             if !decided { return .unavailable }
         }
-        if case .escalate(let m)? = LocalBrain.verdict(latest, finished: true), !decided { return .escalate(m) }
+        if !solo, case .escalate(let m)? = LocalBrain.verdict(latest, finished: true), !decided { return .escalate(m) }
 
         let final = Self.clean(latest)
         answerMarkdown = latest.trimmingCharacters(in: .whitespacesAndNewlines)
         answer = final
         overlayText = final
-        answerSource = "\(engine == .apple ? "On this Mac" : "Local model") · \(Self.elapsed(began))"
+        answerSource = "\(engine == .apple ? "On this Mac" : "Local model")\(solo ? " · offline" : "") · \(Self.elapsed(began))"
         if s.speakReplies {
             if streamSpeech {
                 let rest = String(final.dropFirst(spoken)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -807,6 +884,7 @@ final class AppModel: ObservableObject {
         }
         let agent = GeminiAgent(client: client, chain: chain, settings: s, tools: tools, tracker: usage,
                                 profile: memory.profile(name: s.userName), log: logger)
+        agent.onText = { [weak self] t in Task { @MainActor in self?.streamed(t, mode: mode) } }
         return (try await agent.run(task: text, mode: mode, history: chatHistory(), attachments: files), "Gemini")
     }
 
@@ -1045,8 +1123,35 @@ final class AppModel: ObservableObject {
     }
 
     /// The conversation so far, for the models.
+    /// Long earlier answers are trimmed, since the model only needs the gist to follow the thread.
     private func chatHistory() -> [(role: String, text: String)] {
-        memory.context().map { ($0.role, $0.text) }
+        memory.context(limit: store.value.usageSaver ? 4 : 10).map { t in
+            (t.role, t.role == "assistant" && t.text.count > 700 ? String(t.text.prefix(700)) + "…" : t.text)
+        }
+    }
+
+    // MARK: Streaming
+
+    private var streamSpoken = 0
+    private var streamSpokenText = ""
+
+    /// Shows a cloud answer as it's written. Web answers (which can't involve tool steps) also start
+    /// speaking at the first full sentence when the Mac voice is in use.
+    private func streamed(_ raw: String, mode: Mode) {
+        guard busy else { return }
+        var t = raw
+        if t.lowercased().hasPrefix("heard:") {
+            t = Language.splitHeard(t).rest
+            guard !t.isEmpty else { return }
+        }
+        answerMarkdown = t
+        answer = Self.clean(t)
+        overlayText = answer
+        let s = store.value
+        if mode == .web, s.speakReplies, s.voiceEngine != "gemini" || s.usageSaver {
+            streamSpoken = speakSentences(answer, from: streamSpoken, s)
+            streamSpokenText = String(answer.prefix(streamSpoken))
+        }
     }
 
     private func remember(_ q: String, _ a: String, source: String, mode: String) {
@@ -1063,7 +1168,7 @@ final class AppModel: ObservableObject {
     /// Quietly notes lasting facts the user mentions about themselves.
     private func learn(from text: String) {
         let s = store.value
-        guard s.learnAboutMe, !store.geminiKey.isEmpty, Learner.worthChecking(text),
+        guard s.learnAboutMe, !s.usageSaver, !store.geminiKey.isEmpty, Learner.worthChecking(text),
               Date().timeIntervalSince(lastLearn) > 20, !usage.overCap(s.dailyRequestCap) else { return }
         lastLearn = Date()
         let key = store.geminiKey, known = memory.facts, model = s.liteModel
@@ -1178,7 +1283,17 @@ final class AppModel: ObservableObject {
         answerSource = source
         overlayText = c
         phase = .idle
-        if store.value.speakReplies { speaker.say(Self.spoken(c), settings: store.value) }
+        if store.value.speakReplies {
+            if streamSpokenText.isEmpty {
+                speaker.say(Self.spoken(c), settings: store.value)
+            } else if c.hasPrefix(streamSpokenText) {
+                // Part of it was already spoken while it streamed in; say the rest.
+                let rest = String(c.dropFirst(streamSpokenText.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rest.isEmpty { speaker.sayLocal(rest, settings: store.value) }
+            }
+            streamSpokenText = ""
+            streamSpoken = 0
+        }
         refreshOverlay()
     }
 

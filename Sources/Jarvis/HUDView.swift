@@ -668,8 +668,16 @@ private struct Composer: View {
                             Text("Flash · balanced").tag("flash")
                             Text("Pro · smartest").tag("pro")
                         }
+                        Picker("Effort", selection: binding(model, \.effort)) {
+                            Text("Low effort").tag("low")
+                            Text("Balanced effort").tag("balanced")
+                            Text("High effort").tag("high")
+                            Text("Max effort").tag("max")
+                        }
+                        Toggle("Usage saver", isOn: binding(model, \.usageSaver))
                     } label: {
-                        Text(model.store.value.modelChoice.capitalized)
+                        Text(model.store.value.usageSaver ? "\(model.store.value.modelChoice.capitalized) · saver"
+                                                          : "\(model.store.value.modelChoice.capitalized) · \(model.store.value.effort)")
                             .font(.system(size: 11, weight: .medium, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }

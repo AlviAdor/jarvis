@@ -117,6 +117,15 @@ private struct KeysTab: View {
 private struct ModelsTab: View {
     @EnvironmentObject var model: AppModel
 
+    private var effortHint: String {
+        switch model.store.value.effort {
+        case "low": return "Quickest and lightest: Lite models, little thinking, short answers. Uses the least quota."
+        case "high": return "Flash models for everyday questions, more thinking and room for longer answers."
+        case "max": return "The strongest model available for hard questions, deep thinking, long answers and longer jobs. Uses the most quota."
+        default: return "Lite models for quick things, Flash for real questions; thinks as much as each request needs."
+        }
+    }
+
     private func picker(_ title: String, _ kp: WritableKeyPath<JarvisSettings, String>) -> some View {
         let current = model.store.value[keyPath: kp]
         let options = Array(Set(model.availableModels + [current])).sorted()
@@ -151,6 +160,20 @@ private struct ModelsTab: View {
             Section("Ollama") {
                 OllamaSetup()
             }
+
+            Section {
+                Picker("Effort", selection: bind(model, \.effort)) {
+                    Text("Low").tag("low")
+                    Text("Balanced").tag("balanced")
+                    Text("High").tag("high")
+                    Text("Max").tag("max")
+                }
+                .pickerStyle(.segmented)
+                .disabled(model.store.value.usageSaver)
+                Hint(effortHint)
+                Toggle("Usage saver", isOn: bind(model, \.usageSaver))
+                Hint("Stretches the free Gemini allowance as far as it goes: answers on this Mac whenever possible, Lite models only, the Mac voice, no background requests, and shorter context. Effort is kept low while it's on.")
+            } header: { Text("Effort and usage") }
 
             Section {
                 Picker("Mode", selection: bind(model, \.modelChoice)) {
@@ -221,6 +244,7 @@ private struct VoiceTab: View {
                 Toggle("Listen for the wake word", isOn: bind(model, \.wakeWordEnabled))
                 TextField("Wake word", text: bind(model, \.wakeWord))
                 Slider(value: bind(model, \.micThreshold), in: 0.002...0.04) { Text("Needs louder speech") }
+                Toggle("Understand and answer in any language", isOn: bind(model, \.anyLanguage))
                 Toggle("Stop talking when I start speaking", isOn: bind(model, \.bargeIn))
                 Toggle("Answer by name when I say just \u{201C}\(model.store.value.wakeWord.capitalized)\u{201D}", isOn: bind(model, \.answerWhenCalled))
                 Toggle("Greet me when Jarvis starts", isOn: bind(model, \.greetOnLaunch))
