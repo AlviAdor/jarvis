@@ -49,7 +49,7 @@ public final class GeminiAgent: @unchecked Sendable {
                                                   thinking: Self.thinking(for: model, mode: mode))
                 await tracker.add(r.usage)
                 return r
-            } catch LLMError.http(let code, let body) where [404, 429, 500, 503].contains(code) {
+            } catch LLMError.http(let code, let body) where [403, 404, 429, 500, 503].contains(code) {
                 last = LLMError.http(code, body)
                 if code == 429 {
                     let r = QuotaBook.parse(body)

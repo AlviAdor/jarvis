@@ -24,7 +24,7 @@ final class RouterTests: XCTestCase {
     func testChainFallsBackToCheaperModels() {
         var s = JarvisSettings()
         XCTAssertEqual(r.chain(for: .hard, settings: s), [s.proModel, s.flashModel, s.liteModel])
-        XCTAssertEqual(r.chain(for: .chat, settings: s), [s.liteModel])
+        XCTAssertEqual(r.chain(for: .chat, settings: s), [s.liteModel, s.flashModel])
         s.modelChoice = "flash"
         XCTAssertEqual(r.chain(for: .hard, settings: s), [s.flashModel, s.liteModel])
         XCTAssertNil(r.escalation(from: .screen, settings: s))

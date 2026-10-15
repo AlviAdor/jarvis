@@ -342,11 +342,16 @@ final class QuotaTests: XCTestCase {
         XCTAssertEqual(ModelPicker.ranked(.flash, in: models), ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3-flash-preview"])
         var s = JarvisSettings()
         s.knownModels = models
+        // Search starts on the Lite models (biggest free allowance) and steps up to Flash when they run out.
         let chain = Router().chain(for: .web, settings: s)
-        XCTAssertEqual(chain.first, s.flashModel)
-        XCTAssertTrue(chain.contains("gemini-3.6-flash"))
+        XCTAssertEqual(chain.first, s.liteModel)
         XCTAssertTrue(chain.contains("gemini-3.1-flash-lite"))
+        XCTAssertTrue(chain.contains("gemini-3.8-flash"))
+        XCTAssertTrue(chain.contains("gemini-3.6-flash"))
+        XCTAssertLessThan(chain.firstIndex(of: "gemini-3.1-flash-lite")!, chain.firstIndex(of: "gemini-3.8-flash")!)
         XCTAssertEqual(Set(chain).count, chain.count)
+        // Screen work stays on Flash first.
+        XCTAssertEqual(Router().chain(for: .screen, settings: s).first, s.flashModel)
     }
 }
 

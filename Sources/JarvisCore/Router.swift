@@ -95,21 +95,29 @@ public struct Router: Sendable {
     public func tier(for mode: Mode, settings: JarvisSettings) -> Tier {
         if let forced = Tier(rawValue: settings.modelChoice) { return forced }
         switch mode {
-        case .chat: return .lite
-        case .web, .screen: return .flash
+        case .chat, .web: return .lite     // Lite models have the most generous free allowance
+        case .screen: return .flash
         case .hard: return .pro
         }
+    }
+
+    /// The order tiers are tried in: the chosen one first, then lighter ones, and for everyday chat and
+    /// search a step up to Flash too, so running out of Lite requests doesn't stop Jarvis.
+    func tierOrder(from start: Tier, mode: Mode) -> [Tier] {
+        var out: [Tier] = []
+        var t: Tier? = start
+        while let cur = t { out.append(cur); t = cur.fallback }
+        if start == .lite, mode == .chat || mode == .web { out.append(.flash) }
+        return out
     }
 
     /// Model ids to try in order. Each tier's chosen model comes first, then up to two other models of the
     /// same tier (each has its own free allowance), then the lighter tiers.
     public func chain(for mode: Mode, settings: JarvisSettings, from override: Tier? = nil) -> [String] {
         var out: [String] = []
-        var t: Tier? = override ?? tier(for: mode, settings: settings)
-        while let cur = t {
-            let ids = [settings.modelID(cur)] + ModelPicker.ranked(cur, in: settings.knownModels).prefix(2)
+        for cur in tierOrder(from: override ?? tier(for: mode, settings: settings), mode: mode) {
+            let ids = [settings.modelID(cur)] + ModelPicker.ranked(cur, in: settings.knownModels).prefix(4)
             for id in ids where !out.contains(id) { out.append(id) }
-            t = cur.fallback
         }
         return out
     }

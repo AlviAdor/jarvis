@@ -419,6 +419,8 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     /// Called with a reason when the Gemini voice can't be used and the Mac voice takes over.
     public var onFallback: ((String) -> Void)?
     public var geminiKey: () -> String = { "" }
+    /// Models this key can use, so the voice can move to another voice model when one runs out.
+    public var knownModels: () -> [String] = { [] }
 
     public var isSpeaking: Bool { synth.isSpeaking || (player?.isPlaying ?? false) || fetch != nil }
 
@@ -454,7 +456,7 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         let key = geminiKey()
         fetch = Task { [weak self] in
             do {
-                let wav = try await GeminiVoice.synthesize(text, voice: s.geminiVoice, style: s.voiceStyle, model: s.ttsModel, key: key)
+                let wav = try await GeminiVoice.synthesize(text, voice: s.geminiVoice, style: s.voiceStyle, model: s.ttsModel, key: key, known: self?.knownModels() ?? [])
                 guard let self, !Task.isCancelled else { return }
                 self.fetch = nil
                 let p = try AVAudioPlayer(data: wav)

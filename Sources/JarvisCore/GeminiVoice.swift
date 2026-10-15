@@ -16,6 +16,24 @@ public enum GeminiVoice {
     public static let models = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"]
 
     /// Returns WAV audio (24 kHz mono 16-bit).
+    /// Tries the chosen voice model, then the account's other voice models, skipping any that are out of
+    /// free requests, so a used-up voice falls back to the Mac voice at once instead of after a failed request.
+    public static func synthesize(_ text: String, voice: String, style: String, model: String, key: String, known: [String]) async throws -> Data {
+        let others = known.filter { $0.contains("tts") && $0 != model && $0.hasPrefix("gemini") }.sorted(by: >)
+        let candidates = ([model] + others).filter { QuotaBook.shared.usable($0) }
+        guard !candidates.isEmpty else { throw LLMError.http(429, #"{"error":{"message":"Every Gemini voice is out of free requests for now."}}"#) }
+        var last: Error = LLMError.badResponse
+        for m in candidates.prefix(3) {
+            do {
+                return try await synthesize(text, voice: voice, style: style, model: m, key: key)
+            } catch LLMError.http(let code, let body) where [404, 429].contains(code) {
+                if code == 429 { QuotaBook.shared.note(m, body: body) }
+                last = LLMError.http(code, body)
+            }
+        }
+        throw last
+    }
+
     public static func synthesize(_ text: String, voice: String, style: String, model: String, key: String) async throws -> Data {
         guard !key.isEmpty else { throw LLMError.missingKey }
         var content: [String: Any] = ["type": "text", "text": text]

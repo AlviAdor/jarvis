@@ -15,6 +15,8 @@ public final class QuotaBook: @unchecked Sendable {
 
     private let lock = NSLock()
     private var blocked: [String: (until: Date, kind: Kind)] = [:]
+    /// Google's own words for the last refusal of each model, for Settings.
+    private var said: [String: String] = [:]
     private let key = "jarvis.quota.blocked"
 
     init() {
@@ -70,8 +72,11 @@ public final class QuotaBook: @unchecked Sendable {
         case .noFreeTier: until = now.addingTimeInterval(7 * 86_400)
         case .unknown: until = now.addingTimeInterval(max(10, r.retryAfter ?? 30))
         }
+        let message = (try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+            .flatMap { ($0["error"] as? [String: Any])?["message"] as? String } ?? String(body.prefix(200))
         lock.withLock {
             blocked[model] = (until, r.kind)
+            said[model] = Redact.secrets(String(message.prefix(240)))
             save()
         }
         return r
@@ -95,7 +100,7 @@ public final class QuotaBook: @unchecked Sendable {
     public func status() -> [String] {
         lock.withLock {
             blocked.filter { $0.value.until > Date() }.sorted { $0.key < $1.key }.map { m, b in
-                Self.describe(m, b.kind, b.until)
+                Self.describe(m, b.kind, b.until) + (said[m].map { "\nGoogle said: \($0)" } ?? "")
             }
         }
     }
