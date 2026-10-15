@@ -57,8 +57,10 @@ final class AudioGate: @unchecked Sendable {
         if let req = request {
             req.append(buffer)
             latestLevel = level
-            features.add(buffer, loudEnough: level > threshold)
-            if level > threshold { lastLoud = Date() }
+            // Compared with the room's own background level, so a soft voice still counts as speech.
+            let voiced = level > max(threshold, noiseFloor * 2.5)
+            features.add(buffer, loudEnough: level > max(0.003, noiseFloor * 2.5))
+            if voiced { lastLoud = Date() }
             let quiet = Date().timeIntervalSince(lastLoud) > pause + extraPause
             let tooLong = Date().timeIntervalSince(began) > 25
             if (quiet || tooLong) && !ended {
@@ -144,7 +146,13 @@ public final class VoiceEngine: ObservableObject {
     @Published public private(set) var profile: VoiceProfile? = VoiceProfile.load()
 
     public var onCommand: ((String) -> Void)?
-    public var onRejected: (() -> Void)?
+    /// The voice didn't match; with what was said and the voiceprint, so the user can say "it was me".
+    public var onRejected: ((String, [Float]) -> Void)?
+    /// How closely the last request matched the user's voice, and what it needed.
+    @Published public private(set) var lastMatch: (score: Float, needed: Float)?
+    /// Words recognition should expect, such as the wake word and the user's name.
+    public var vocabulary: [String] = []
+    private var learnedSinceSave = 0
     public var onEnrolled: ((Bool) -> Void)?
     public var lockEnabled = false
     public var lockStrictness = 0.5
@@ -302,10 +310,52 @@ public final class VoiceEngine: ObservableObject {
         profile = nil
     }
 
+    /// Too little audio to judge is let through; only a clear mismatch is turned away.
+    /// Confident matches, and anything said after pressing the shortcut, teach the profile a little more.
     private func passesLock(_ v: [Float]?) -> Bool {
-        guard lockEnabled, let profile, !pushArmed else { return true }
-        guard let v else { return false }
-        return profile.matches(v, strictness: lockStrictness)
+        guard let profile, let v else { return true }
+        let score = profile.score(v), needed = profile.threshold(strictness: lockStrictness)
+        lastMatch = (score, needed)
+        if pushArmed || score >= needed + 0.04 { learn(v) }
+        guard lockEnabled, !pushArmed else { return true }
+        return score >= needed
+    }
+
+    private func learn(_ v: [Float]) {
+        guard var p = profile else { return }
+        p.learn(v)
+        profile = p
+        learnedSinceSave += 1
+        if learnedSinceSave >= 3 { p.save(); learnedSinceSave = 0 }
+    }
+
+    /// The user says a rejected request was theirs: learn from it.
+    public func confirmMine(_ v: [Float]) {
+        learn(v)
+        profile?.save()
+    }
+
+    /// Fuzzy match for the wake word, since recognition often hears "Jervis" or "Javis".
+    nonisolated public static func isWake(_ word: String, wakeWord: String = "jarvis") -> Bool {
+        let w = word.lowercased().trimmingCharacters(in: .punctuationCharacters)
+        let target = wakeWord.lowercased()
+        if w == target || w == "jarvis" { return true }
+        guard w.count >= 4, abs(w.count - target.count) <= 2, let f = w.first, let tf = target.first else { return false }
+        let sameStart = f == tf || (tf == "j" && "gcy".contains(f))
+        return sameStart && distance(w, target) <= (target.count >= 6 ? 2 : 1)
+    }
+
+    nonisolated static func distance(_ a: String, _ b: String) -> Int {
+        let a = Array(a), b = Array(b)
+        var prev = Array(0...b.count)
+        for i in 1...max(a.count, 1) where !a.isEmpty {
+            var cur = [i] + Array(repeating: 0, count: b.count)
+            for j in 1...max(b.count, 1) where !b.isEmpty {
+                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1))
+            }
+            prev = cur
+        }
+        return prev[b.count]
     }
 
     private func beginUtterance() {
@@ -315,6 +365,9 @@ public final class VoiceEngine: ObservableObject {
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
+        req.addsPunctuation = true
+        // Bias recognition towards the words that matter most: the wake word and the user's name.
+        req.contextualStrings = Array(Set(["Jarvis", "Hey Jarvis", wakeWord.capitalized] + vocabulary)).filter { !$0.isEmpty }
         if recognizer.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         request = req
         hearing = true
@@ -360,8 +413,8 @@ public final class VoiceEngine: ObservableObject {
             collect(vector, heard: heard)
         } else if passesLock(vector) {
             deliver(heard)
-        } else if containsWake(heard) || armed {
-            onRejected?()
+        } else if containsWake(heard) || armed, let vector {
+            onRejected?(heard, vector)
         }
         partial = ""
     }
@@ -386,11 +439,28 @@ public final class VoiceEngine: ObservableObject {
 
     private func wakeRange(in s: String) -> Range<String.Index>? {
         let lower = s.lowercased()
-        for w in [wakeWord.lowercased(), "jarvis", "jervis"] {
+        for w in [wakeWord.lowercased(), "jarvis"] {
             if let r = lower.range(of: w) { return r }
+        }
+        // Near misses: the first word that sounds like the wake word.
+        var idx = lower.startIndex
+        for word in lower.split(separator: " ", omittingEmptySubsequences: true) {
+            guard let r = lower.range(of: word, range: idx..<lower.endIndex) else { continue }
+            idx = r.upperBound
+            if Self.isWake(String(word), wakeWord: wakeWord) { return r }
         }
         return nil
     }
+
+    /// What was asked, without the wake word in front.
+    public func command(in heard: String) -> String {
+        let t = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let r = wakeRange(in: t) else { return t }
+        return String(t[r.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?"))
+    }
+
+    /// Called when the user says only the wake word, so Jarvis can answer "Yes?".
+    public var onWakeOnly: (() -> Void)?
 
     private func deliver(_ heard: String) {
         let t = heard.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -402,6 +472,7 @@ public final class VoiceEngine: ObservableObject {
                 onCommand?(rest)
             } else {
                 arm()
+                onWakeOnly?()
             }
         } else if armed {
             disarm()
@@ -419,6 +490,19 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     /// Called with a reason when the Gemini voice can't be used and the Mac voice takes over.
     public var onFallback: ((String) -> Void)?
     public var geminiKey: () -> String = { "" }
+    /// Short phrases already spoken in the Gemini voice, kept so greetings play instantly and cost nothing.
+    private static let cacheDir: URL = {
+        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Jarvis/voice-cache")
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+
+    private static func cacheURL(_ text: String, _ s: JarvisSettings) -> URL {
+        let key = "\(s.geminiVoice)|\(s.voiceStyle)|\(text)"
+        var h: UInt64 = 1469598103934665603
+        for b in key.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+        return cacheDir.appendingPathComponent(String(h, radix: 16) + ".wav")
+    }
     /// Models this key can use, so the voice can move to another voice model when one runs out.
     public var knownModels: () -> [String] = { [] }
 
@@ -454,11 +538,20 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         stop()
         onSpeakingChange?(true)
         let key = geminiKey()
+        let cached = text.count <= 80 ? Self.cacheURL(text, s) : nil
+        if let cached, let wav = try? Data(contentsOf: cached), let p = try? AVAudioPlayer(data: wav) {
+            p.delegate = self
+            p.volume = Float(s.voiceVolume)
+            player = p
+            p.play()
+            return
+        }
         fetch = Task { [weak self] in
             do {
                 let wav = try await GeminiVoice.synthesize(text, voice: s.geminiVoice, style: s.voiceStyle, model: s.ttsModel, key: key, known: self?.knownModels() ?? [])
                 guard let self, !Task.isCancelled else { return }
                 self.fetch = nil
+                if let cached { try? wav.write(to: cached, options: .atomic) }
                 let p = try AVAudioPlayer(data: wav)
                 p.delegate = self
                 p.volume = Float(s.voiceVolume)

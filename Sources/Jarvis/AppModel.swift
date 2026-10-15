@@ -171,7 +171,22 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             LocalBrain.shared.prewarm(self.store.value)
         }
-        voice.onRejected = { [weak self] in self?.flash("That didn't sound like you, so I ignored it.") }
+        voice.onRejected = { [weak self] heard, vector in
+            guard let self else { return }
+            let match = self.voice.lastMatch.map { String(format: " (match %.0f%%, needs %.0f%%)", $0.score * 100, $0.needed * 100) } ?? ""
+            self.log("Voice didn't match" + match)
+            self.flash("That didn't sound like you, so I ignored it.", action: "It was me") { [weak self] in
+                guard let self else { return }
+                self.voice.confirmMine(vector)
+                let command = self.voice.command(in: heard)
+                if command.count >= 2 { self.submit(command) } else { self.pushToTalk() }
+            }
+        }
+        // Say just "Jarvis" and it answers by name before listening.
+        voice.onWakeOnly = { [weak self] in
+            guard let self, self.store.value.answerWhenCalled, self.store.value.speakReplies else { return }
+            self.speaker.say(self.acknowledgement(), settings: self.store.value, queue: false)
+        }
         // Talking over Jarvis stops it, and what you say becomes the next request.
         voice.onBargeIn = { [weak self] in
             guard let self, self.speaking else { return }
@@ -243,7 +258,13 @@ final class AppModel: ObservableObject {
         telemetry.setActive(wantsTelemetry)
         startHealthWatch()
         if store.value.rememberConversations { restoreHistory() } else { memory.clearConversation() }
-        watchStrain()
+        if !needsOnboarding, store.value.greetOnLaunch, store.value.speakReplies {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard let self else { return }
+                self.speaker.say(self.greeting(), settings: self.store.value)
+            }
+        }
         refreshModelList()
     }
 
@@ -279,6 +300,7 @@ final class AppModel: ObservableObject {
         voice.wakeWord = s.wakeWord
         voice.threshold = Float(s.micThreshold)
         voice.pause = s.responsePause
+        voice.vocabulary = [s.userName, s.userName.split(separator: " ").first.map(String.init) ?? ""].filter { !$0.isEmpty }
         voice.bargeInEnabled = s.bargeIn
         voice.lockEnabled = s.voiceLockEnabled
         voice.lockStrictness = s.voiceLockStrictness
@@ -965,6 +987,25 @@ final class AppModel: ObservableObject {
             notifyAnswer = false
             Notifier.shared.post(.answer, title: "Jarvis · \(q.prefix(60))", body: Self.clean(a), info: ["question": q])
         }
+    }
+
+    // MARK: Greetings
+
+    private var firstName: String { store.value.userName.split(separator: " ").first.map(String.init) ?? "" }
+
+    /// What Jarvis says when called by name with nothing else.
+    func acknowledgement() -> String {
+        let n = firstName
+        let options = n.isEmpty ? ["Yes?", "I'm listening.", "Go ahead."] : ["Yes, \(n)?", "Hey \(n)?", "I'm listening, \(n).", "Go ahead, \(n)."]
+        return options.randomElement() ?? "Yes?"
+    }
+
+    /// What Jarvis says when it starts.
+    func greeting() -> String {
+        let n = firstName
+        let h = Calendar.current.component(.hour, from: Date())
+        let part = h < 5 ? "Hey" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : h < 22 ? "Good evening" : "Hey"
+        return n.isEmpty ? "\(part). I'm here when you need me." : "\(part), \(n). I'm here when you need me."
     }
 
     // MARK: Notification actions

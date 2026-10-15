@@ -133,7 +133,23 @@ final class VoiceFeatures {
 
 public struct VoiceProfile: Codable, Equatable {
     public var center: [Float]
-    public var floor: Float   // lowest similarity seen between the user's own samples
+    public var floor: Float          // the lowest score the user's own voice is expected to reach
+    public var samples: [[Float]]    // every learned sample, newest last
+
+    public static let maxSamples = 40
+
+    public init(center: [Float], floor: Float, samples: [[Float]] = []) {
+        self.center = center
+        self.floor = floor
+        self.samples = samples
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        center = try c.decode([Float].self, forKey: .center)
+        floor = try c.decode(Float.self, forKey: .floor)
+        samples = try c.decodeIfPresent([[Float]].self, forKey: .samples) ?? []
+    }
 
     public static func cosine(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
@@ -142,25 +158,59 @@ public struct VoiceProfile: Codable, Equatable {
         return dot / ((na.squareRoot() * nb.squareRoot()) + 1e-9)
     }
 
-    /// Needs at least 3 samples. Each sample is scored against the average of the others.
-    public static func enroll(_ samples: [[Float]]) -> VoiceProfile? {
-        guard samples.count >= 3, let dim = samples.first?.count else { return nil }
-        func avg(_ s: [[Float]]) -> [Float] {
-            (0..<dim).map { i in s.reduce(0) { $0 + $1[i] } / Float(s.count) }
-        }
-        var worst: Float = 1
-        for i in samples.indices {
-            var others = samples
-            others.remove(at: i)
-            worst = min(worst, cosine(samples[i], avg(others)))
-        }
-        return VoiceProfile(center: avg(samples), floor: worst)
+    static func average(_ s: [[Float]]) -> [Float] {
+        guard let dim = s.first?.count else { return [] }
+        return (0..<dim).map { i in s.reduce(0) { $0 + $1[i] } / Float(s.count) }
     }
 
-    /// strictness 0...1: higher demands a closer match.
+    /// How much `v` sounds like the user: half the match to their average voice, half the match to the
+    /// three samples it's closest to, so natural variety in how they speak still counts.
+    static func score(_ v: [Float], center: [Float], samples: [[Float]]) -> Float {
+        let c = cosine(v, center)
+        guard samples.count >= 3 else { return c }
+        let near = samples.map { cosine(v, $0) }.sorted(by: >).prefix(3)
+        return 0.5 * c + 0.5 * near.reduce(0, +) / Float(near.count)
+    }
+
+    public func score(_ v: [Float]) -> Float { Self.score(v, center: center, samples: samples) }
+
+    /// Where the user's own voice sits: each sample scored against all the others, then a margin below
+    /// the typical score that still covers their quieter or hoarser moments.
+    static func calibrate(_ samples: [[Float]]) -> Float {
+        let loo: [Float] = samples.indices.map { i in
+            var others = samples
+            others.remove(at: i)
+            return score(samples[i], center: average(others), samples: others)
+        }
+        let mean = loo.reduce(0, +) / Float(loo.count)
+        let sd = (loo.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(loo.count)).squareRoot()
+        return min(loo.min() ?? mean, mean - 1.5 * sd)
+    }
+
+    /// Needs at least 3 samples.
+    public static func enroll(_ samples: [[Float]]) -> VoiceProfile? {
+        guard samples.count >= 3, samples.allSatisfy({ $0.count == samples[0].count }) else { return nil }
+        let kept = Array(samples.suffix(maxSamples))
+        return VoiceProfile(center: average(kept), floor: calibrate(kept), samples: kept)
+    }
+
+    /// The score needed to pass. strictness 0...1: higher demands a closer match.
+    public func threshold(strictness: Double) -> Float {
+        floor - Float(0.10 * (1 - strictness)) - 0.02
+    }
+
     public func matches(_ v: [Float], strictness: Double) -> Bool {
-        let slack = Float(0.10 * (1 - strictness)) + 0.02
-        return Self.cosine(v, center) >= floor - slack
+        score(v) >= threshold(strictness: strictness)
+    }
+
+    /// Adds a sample the user confirmed was them, so the profile keeps up with their mic, room and mood.
+    public mutating func learn(_ v: [Float]) {
+        guard v.count == center.count else { return }
+        samples.append(v)
+        if samples.count > Self.maxSamples { samples.removeFirst(samples.count - Self.maxSamples) }
+        guard samples.count >= 3 else { return }
+        center = Self.average(samples)
+        floor = Self.calibrate(samples)
     }
 
     private static var url: URL {
