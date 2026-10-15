@@ -7,21 +7,50 @@ public struct MCPServerConfig: Codable, Identifiable, Equatable, Sendable {
     public var args: [String]
     public var enabled: Bool
     public var trusted: Bool   // trusted servers run without asking each time
+    /// Environment variables holding access tokens. Their values live in the Keychain, never in settings.
+    public var secrets: [String]
+    public var about: String
 
-    public init(id: String, command: String, args: [String], enabled: Bool = true, trusted: Bool = false) {
+    public init(id: String, command: String, args: [String], enabled: Bool = true, trusted: Bool = false,
+                secrets: [String] = [], about: String = "") {
         self.id = id
         self.command = command
         self.args = args
         self.enabled = enabled
         self.trusted = trusted
+        self.secrets = secrets
+        self.about = about
     }
 
-    /// Well-known open-source servers. They need Node (npx) or uv (uvx) installed.
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        command = try c.decode(String.self, forKey: .command)
+        args = try c.decodeIfPresent([String].self, forKey: .args) ?? []
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        trusted = try c.decodeIfPresent(Bool.self, forKey: .trusted) ?? false
+        secrets = try c.decodeIfPresent([String].self, forKey: .secrets) ?? []
+        about = try c.decodeIfPresent(String.self, forKey: .about) ?? ""
+    }
+
+    public static func secretKey(_ server: String, _ name: String) -> String { "mcp.\(server).\(name)" }
+
+    /// Well-known open-source (MIT-licensed) servers. They run on Node, which Jarvis can install for you.
     public static let presets: [MCPServerConfig] = [
+        MCPServerConfig(id: "hubspot", command: "npx", args: ["-y", "@hubspot/mcp-server"], secrets: ["PRIVATE_APP_ACCESS_TOKEN"],
+                        about: "Contacts, companies and deals. Token: HubSpot, Settings, Integrations, Private apps."),
+        MCPServerConfig(id: "notion", command: "npx", args: ["-y", "@notionhq/notion-mcp-server"], secrets: ["NOTION_TOKEN"],
+                        about: "Pages and databases. Token: notion.so/my-integrations, then share pages with it."),
+        MCPServerConfig(id: "airtable", command: "npx", args: ["-y", "airtable-mcp-server"], secrets: ["AIRTABLE_API_KEY"],
+                        about: "Bases, tables and records. Token: airtable.com/create/tokens."),
+        MCPServerConfig(id: "slack", command: "npx", args: ["-y", "@modelcontextprotocol/server-slack"], secrets: ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+                        about: "Channels and messages. Needs a Slack app's bot token and your workspace ID."),
+        MCPServerConfig(id: "github", command: "npx", args: ["-y", "@modelcontextprotocol/server-github"], secrets: ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+                        about: "Issues, pull requests and repositories. Token: github.com/settings/tokens."),
+        MCPServerConfig(id: "postgres", command: "npx", args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/postgres"],
+                        about: "Read-only queries on a Postgres database; edit the connection address after adding."),
         MCPServerConfig(id: "files", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "~/Documents"]),
         MCPServerConfig(id: "memory", command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"]),
-        MCPServerConfig(id: "fetch", command: "uvx", args: ["mcp-server-fetch"]),
-        MCPServerConfig(id: "time", command: "uvx", args: ["mcp-server-time"]),
         MCPServerConfig(id: "browser", command: "npx", args: ["-y", "@playwright/mcp@latest"]),
     ]
 }
@@ -70,8 +99,12 @@ final class MCPClient: @unchecked Sendable {
         p.arguments = [config.command] + config.args.map { ($0 as NSString).expandingTildeInPath }
         var env = ProcessInfo.processInfo.environment
         // Apps launched from Finder get a minimal PATH; add the usual tool locations so npx and uvx resolve.
-        env["PATH"] = ["/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/.local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""]
+        env["PATH"] = [NodeRuntime.bin.path, "/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/.local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""]
             .joined(separator: ":")
+        // Access tokens come from the Keychain only when the server starts.
+        for name in config.secrets {
+            if let v = Keychain.get(MCPServerConfig.secretKey(config.id, name)), !v.isEmpty { env[name] = v }
+        }
         p.environment = env
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = inPipe

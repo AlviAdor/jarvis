@@ -530,3 +530,93 @@ final class LanguageAndEffortTests: XCTestCase {
         XCTAssertFalse(Router.isSubstantive("hi there"))
     }
 }
+
+final class MacControlTests: XCTestCase {
+    func testRiskyScriptsAreSpotted() {
+        XCTAssertTrue(Scripting.isRisky("tell application \"Finder\" to delete file \"a\""))
+        XCTAssertTrue(Scripting.isRisky("do shell script \"ls\""))
+        XCTAssertTrue(Scripting.isRisky("tell application \"System Events\" to keystroke \"hi\""))
+        XCTAssertFalse(Scripting.isRisky("tell application \"Music\" to play"))
+    }
+
+    func testFileOperationsStayInTheHomeFolder() async throws {
+        XCTAssertFalse(FileOps.allowed("/etc/hosts"))
+        XCTAssertFalse(FileOps.allowed("~/Library/Preferences/x.plist"))
+        XCTAssertFalse(FileOps.allowed("~/.ssh/config"))
+        let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/JarvisTest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "hi".write(to: dir.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        let made = await FileOps.perform("make_folder", from: "", to: dir.path, name: "Box")
+        XCTAssertTrue(made.hasPrefix("Made"), made)
+        let moved = await FileOps.perform("move", from: dir.appendingPathComponent("a.txt").path, to: dir.appendingPathComponent("Box").path, name: "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("Box/a.txt").path), moved)
+        let copied = await FileOps.perform("copy", from: dir.appendingPathComponent("Box/a.txt").path, to: dir.appendingPathComponent("Box").path, name: "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("Box/a 2.txt").path), copied)   // never overwrites
+        let zipped = await FileOps.perform("zip", from: dir.appendingPathComponent("Box").path, to: "", name: "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("Box.zip").path), zipped)
+    }
+
+    func testProjectsAreRecognised() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-proj-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "{}".write(to: dir.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(Dev.command("test", in: dir), ["npm", "test", "--silent"])
+        XCTAssertEqual(Dev.command("lint", in: dir)?.last, ".")
+        XCTAssertNil(Dev.repo("/tmp"))
+        XCTAssertNotNil(Dev.repo(FileManager.default.currentDirectoryPath) ?? Dev.repo(#filePath))
+    }
+
+    func testDatabaseChangesAreSpotted() {
+        XCTAssertTrue(SQLite.isWrite("  DELETE FROM users"))
+        XCTAssertTrue(SQLite.isWrite("insert into t values (1)"))
+        XCTAssertFalse(SQLite.isWrite("select * from users"))
+    }
+
+    func testMarkdownBecomesADocument() throws {
+        let html = Documents.html("# Proposal\n\nFor **Acme**, with *care*.\n\n- Design\n- Build\n\n1. Week one\n2. Week two")
+        for part in ["<h1>Proposal</h1>", "<b>Acme</b>", "<i>care</i>", "<ul>", "<li>Design</li>", "<ol>"] { XCTAssertTrue(html.contains(part), part) }
+        let saved = Documents.save(name: "Jarvis test \(UUID().uuidString.prefix(6))", format: "docx", content: "# Hello\n\nWorld")
+        XCTAssertTrue(saved.hasPrefix("Saved "), saved)
+        let path = (String(saved.dropFirst(6)) as NSString).expandingTildeInPath
+        XCTAssertGreaterThan((try? Data(contentsOf: URL(fileURLWithPath: path)).count) ?? 0, 1000)
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    func testFeedsAreParsed() {
+        let rss = """
+        <rss><channel><item><title>React developer (remote)</title><link>https://example.com/1</link>
+        <pubDate>Fri, 16 Oct 2026</pubDate><description><![CDATA[<p>Build a dashboard</p>]]></description></item></channel></rss>
+        """
+        let p = Feeds.Parser()
+        let x = XMLParser(data: Data(rss.utf8))
+        x.delegate = p
+        x.parse()
+        XCTAssertEqual(p.items.first?["title"], "React developer (remote)")
+        XCTAssertEqual(p.items.first?["link"], "https://example.com/1")
+    }
+
+    func testOnlyRelevantToolsAreSent() {
+        func names(_ hint: String) -> Set<String> {
+            Set(ToolBox(settings: JarvisSettings(), memory: MemoryStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-test-memory")),
+                        confirm: { _ in true }, notify: { _, _ in }, hint: hint).declarations(screen: false).compactMap { $0["name"] as? String })
+        }
+        XCTAssertTrue(names("commit my changes in the jarvis repo").contains("dev"))
+        XCTAssertFalse(names("what's the capital of Japan").contains("dev"))
+        XCTAssertTrue(names("play some lofi on spotify").contains("spotify"))
+        XCTAssertTrue(names("").contains("read_feed"))   // automations get everything
+        XCTAssertTrue(names("what's the capital of Japan").contains("ui"))   // core tools are always there
+    }
+
+    func testComputerUseKeysMapToMacKeys() {
+        XCTAssertEqual(ComputerUseAgent.keyName("Control"), "ctrl")
+        XCTAssertEqual(ComputerUseAgent.keyName("Meta"), "cmd")
+        XCTAssertEqual(ComputerUseAgent.keyName("Enter"), "return")
+        var s = JarvisSettings()
+        s.knownModels = ["gemini-3.8-flash", "gemini-4-argon"]
+        XCTAssertEqual(ComputerUseAgent.pick(s), s.flashModel)
+        s.effort = "max"
+        XCTAssertEqual(ComputerUseAgent.pick(s), "gemini-4-argon")
+    }
+}

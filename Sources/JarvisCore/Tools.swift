@@ -21,6 +21,8 @@ public final class ToolBox: @unchecked Sendable {
     private let mcp: [MCPTool]
     private let search: (@Sendable (String) async -> String)?
     private let setSetting: (@Sendable (String, String) async -> String)?
+    /// What the user asked, so only the tool groups that could matter are sent (smaller, faster requests).
+    private let hint: String
     /// Set once untrusted content (mail, files, web pages, calendar invites, command output...) has entered the conversation.
     private var tainted = false
 
@@ -30,7 +32,9 @@ public final class ToolBox: @unchecked Sendable {
                 onAction: @escaping @Sendable (ActionEvent) -> Void = { _ in },
                 mcp: [MCPTool] = [],
                 search: (@Sendable (String) async -> String)? = nil,
-                setSetting: (@Sendable (String, String) async -> String)? = nil) {
+                setSetting: (@Sendable (String, String) async -> String)? = nil,
+                hint: String = "") {
+        self.hint = hint
         self.settings = settings
         self.memory = memory
         self.confirm = confirm
@@ -44,6 +48,9 @@ public final class ToolBox: @unchecked Sendable {
     /// Agents use this to show steps that aren't tool calls, such as a web search.
     public func report(_ e: ActionEvent) { onAction(e) }
 
+    /// Asks the user to approve something, with the same dialog as risky tool steps.
+    public func ask(_ question: String) async -> Bool { await confirm(question) }
+
     private func mcpTool(_ name: String) -> MCPTool? {
         name.hasPrefix("mcp_") ? mcp.first { $0.exposedName == name } : nil
     }
@@ -51,8 +58,27 @@ public final class ToolBox: @unchecked Sendable {
     /// Tools whose results come from outside the user's own instructions.
     static let readsOutside: Set<String> = [
         "mail_unread", "read_file", "list_folder", "clipboard_read", "shell", "fetch_url", "web_search",
-        "calendar", "notes", "find_files", "shortcuts", "run_applescript",
+        "calendar", "notes", "find_files", "shortcuts", "run_applescript", "ui", "browser", "read_feed", "http_request", "sqlite",
     ]
+
+    static let groupWords: [String: [String]] = [
+        "dev": ["git", "commit", "repo", "pull request", " pr ", " prs", "test", "lint", "format", "build", "code", "branch", "diff",
+                "push", "project", "bug", "compile", "merge"],
+        "http": ["api", "endpoint", "http", "request", "curl", "json", "webhook", "localhost", "postman", "status code"],
+        "sqlite": ["sqlite", ".db", "database", "sql", "table", "query"],
+        "music": ["spotify", "play", "song", "music", "playlist", "track", "album", "artist", "volume", "sound", "audio", "speaker",
+                  "headphone", "airpods", "output", "microphone", " mic", "noise", "lofi", "pause", "skip", "next"],
+        "docs": ["proposal", "contract", "nda", "agreement", "document", "report", "save", "case study", "cover letter", "invoice",
+                 "draft", "word", "docx", "status update", "release notes", "portfolio", "letter", "template", "email"],
+        "feeds": ["feed", "rss", "jobs", "job ", "upwork", "fiverr", "linkedin", "freelance", "news", "blog", "postings", "gig"],
+    ]
+
+    /// Whether a group of tools could matter for this request. With no hint (automations), everything is offered.
+    func wants(_ group: String) -> Bool {
+        guard !hint.isEmpty else { return true }
+        let s = " " + hint.lowercased() + " "
+        return Self.groupWords[group]?.contains { s.contains($0) } ?? true
+    }
 
     // MARK: Declarations
 
@@ -86,8 +112,9 @@ public final class ToolBox: @unchecked Sendable {
             Self.fn("set_timer", "Notify and speak after a delay.", ["seconds": ("INTEGER", "Delay"), "label": ("STRING", "What it is for")], required: ["seconds"]),
             Self.fn("read_file", "Read a file from an allowed folder. Handles text, PDF, Word, RTF and HTML.", ["path": ("STRING", "File path")], required: ["path"]),
             Self.fn("list_folder", "List files in an allowed folder.", ["path": ("STRING", "Folder path")], required: ["path"]),
-            Self.fn("find_files", "Find files and folders in the user's home folder by name with Spotlight.", [
-                "query": ("STRING", "Part of the name"), "kind": ("STRING", "Optional: pdf, image, video, document or folder"),
+            Self.fn("find_files", "Find files and folders in the user's home folder with Spotlight, by name or by what's inside them (code, notes, documents).", [
+                "query": ("STRING", "Part of the name, or words inside the file"), "kind": ("STRING", "Optional: pdf, image, video, document or folder"),
+                "in_contents": ("BOOLEAN", "Search inside files instead of names"), "folder": ("STRING", "Optional folder to search in"),
             ], required: ["query"]),
             Self.fn("open_file", "Open a file with its default app, or reveal it in Finder.", [
                 "path": ("STRING", "File path in the home folder"), "reveal": ("BOOLEAN", "Show in Finder instead of opening"),
@@ -105,6 +132,67 @@ public final class ToolBox: @unchecked Sendable {
         }
         if settings.webReadEnabled {
             d.append(Self.fn("fetch_url", "Read the text of a web page.", ["url": ("STRING", "http or https URL")], required: ["url"]))
+        }
+        if settings.appControlEnabled {
+            d.append(Self.fn("ui", "Operate apps through their real controls (Accessibility), without screenshots: list the front window's buttons, fields and menus, press one, fill a field, choose a menu item, switch apps, or act on windows. Prefer this over the screen.", [
+                "action": ("STRING", "list, press, set_text, menu, focus or window"),
+                "target": ("STRING", "For press/set_text: a #number from the last list, or the control's label"),
+                "text": ("STRING", "For set_text"),
+                "path": ("STRING", "For menu: e.g. File > Export as PDF…"),
+                "app": ("STRING", "App name; default is the app in front"),
+                "window_action": ("STRING", "For window: minimize, close, zoom, fullscreen, hide or hide_others"),
+            ], required: ["action"]))
+            d.append(Self.fn("run_applescript", "Run AppleScript to automate Mac apps (Finder, Safari, Music, Mail, Notes, System Events and more). The script is shown to the user; risky ones ask first.", [
+                "script": ("STRING", "AppleScript source"), "purpose": ("STRING", "One short sentence on what it does"),
+            ], required: ["script", "purpose"]))
+            d.append(Self.fn("browser", "The user's web browser: the page they're on, their open tabs, reading the current page's text, or opening a link.", [
+                "action": ("STRING", "current, tabs, read or open"), "url": ("STRING", "For open"),
+            ], required: ["action"]))
+            d.append(Self.fn("files", "Move, copy, rename, zip or unzip the user's files, or make a folder. Only inside the home folder; nothing is overwritten.", [
+                "action": ("STRING", "move, copy, rename, make_folder, zip or unzip"),
+                "from": ("STRING", "Source path"), "to": ("STRING", "Destination folder or path"), "name": ("STRING", "New name, or folder name"),
+            ], required: ["action"]))
+        }
+        if settings.workToolsEnabled {
+            if wants("dev") {
+                d.append(Self.fn("dev", "Work with a code project: git status, log, branches, diff, commit (write the message from the diff), push, GitHub pull request status, and running its tests, formatter or linter.", [
+                    "action": ("STRING", "status, log, branches, diff, commit, push, pr_status, test, format or lint"),
+                    "path": ("STRING", "The project folder"), "message": ("STRING", "For commit"),
+                ], required: ["action", "path"]))
+            }
+            if wants("http") {
+                d.append(Self.fn("http_request", "Call an API or web endpoint (also localhost) and see the status, type and body, like an API client.", [
+                    "method": ("STRING", "GET, POST, PUT, PATCH or DELETE"), "url": ("STRING", "Full URL"),
+                    "headers": ("STRING", "One 'Name: value' per line"), "body": ("STRING", "Request body, often JSON"),
+                ], required: ["method", "url"]))
+            }
+            if wants("sqlite") {
+                d.append(Self.fn("sqlite", "Query a SQLite database file. Reading is free; changes ask the user first.", [
+                    "path": ("STRING", "Database file"), "query": ("STRING", "SQL"),
+                ], required: ["path", "query"]))
+            }
+            if wants("docs") {
+                d.append(Self.fn("save_document", "Save writing (proposals, contracts, NDAs, reports, status updates, case studies, cover letters) as a document in ~/Documents/Jarvis.", [
+                    "name": ("STRING", "File name without extension"), "format": ("STRING", "docx (default), rtf, md, txt or html"),
+                    "content": ("STRING", "The document in Markdown"),
+                ], required: ["name", "content"]))
+                d.append(Self.fn("mail_draft", "Open a Mail draft for the user to check and send, optionally with a file attached.", [
+                    "to": ("STRING", "Recipient"), "subject": ("STRING", "Subject"), "body": ("STRING", "Message"), "attachment": ("STRING", "Optional file path"),
+                ], required: ["subject", "body"]))
+            }
+            if wants("feeds") {
+                d.append(Self.fn("read_feed", "Read the latest items of an RSS or Atom feed (job boards, blogs, news).", ["url": ("STRING", "Feed URL")], required: ["url"]))
+            }
+        }
+        if settings.controlEnabled, wants("music") {
+            d.append(Self.fn("spotify", "Control Spotify: what's playing, play a spotify: link or resume, pause, next, previous, shuffle, repeat, volume, or open a search.", [
+                "action": ("STRING", "now_playing, play, pause, play_pause, next, previous, shuffle, repeat, volume or search"),
+                "value": ("STRING", "A spotify: link, a volume 0-100, or search words"),
+            ], required: ["action"]))
+            d.append(Self.fn("audio", "Sound devices and focus noise: list devices, switch the speakers or microphone, play white, pink or brown noise, or stop it.", [
+                "action": ("STRING", "devices, use_output, use_input, noise or stop_noise"),
+                "name": ("STRING", "Device name for use_output/use_input"), "type": ("STRING", "white, pink or brown"), "volume": ("NUMBER", "0.05 to 1"),
+            ], required: ["action"]))
         }
         if settings.cleanupEnabled {
             d.append(Self.fn("disk", "See what uses disk space and free it up. Always start with report. Deleting and trashing ask the user first.", [
@@ -243,6 +331,31 @@ public final class ToolBox: @unchecked Sendable {
         func file(_ k: String) -> String { (s(k) as NSString).lastPathComponent }
         switch name {
         case "open_app": return ("Opening \(s("name"))", nil, nil, "app.badge")
+        case "ui":
+            switch s("action") {
+            case "press": return ("Pressing \(s("target"))", s("app").isEmpty ? nil : s("app"), nil, "hand.tap")
+            case "set_text": return ("Filling \(s("target"))", s("text"), nil, "character.cursor.ibeam")
+            case "menu": return ("Choosing \(s("path"))", nil, nil, "filemenu.and.selection")
+            case "focus": return ("Switching to \(s("app"))", nil, nil, "macwindow.on.rectangle")
+            case "window": return ("\(s("window_action").capitalized) window", nil, nil, "macwindow")
+            default: return ("Looking at \(s("app").isEmpty ? "the app in front" : s("app"))", nil, nil, "list.bullet.rectangle")
+            }
+        case "run_applescript": return (s("purpose").isEmpty ? "Running AppleScript" : s("purpose"), s("script"), nil, "applescript")
+        case "browser":
+            switch s("action") {
+            case "open": return ("Opening \(URL(string: s("url"))?.host ?? "a link")", s("url"), nil, "safari")
+            case "tabs": return ("Checking your tabs", nil, nil, "rectangle.stack")
+            case "read": return ("Reading the page you're on", nil, nil, "doc.richtext")
+            default: return ("Checking your browser", nil, nil, "safari")
+            }
+        case "files":
+            let what = (s("from") as NSString).lastPathComponent
+            switch s("action") {
+            case "make_folder": return ("Making folder \(s("name"))", nil, nil, "folder.badge.plus")
+            case "zip": return ("Zipping \(what)", nil, nil, "doc.zipper")
+            case "unzip": return ("Unzipping \(what)", nil, nil, "doc.zipper")
+            default: return ("\(s("action").capitalized) \(what)", s("to").isEmpty ? s("name") : s("to"), nil, "folder")
+            }
         case "quit_app": return ("Quitting \(s("name"))", nil, nil, "xmark.app")
         case "running_apps": return ("Checking open apps", nil, nil, "square.grid.2x2")
         case "open_url": return ("Opening \(URL(string: s("url"))?.host ?? "a link")", s("url"), nil, "safari")
@@ -258,6 +371,14 @@ public final class ToolBox: @unchecked Sendable {
         case "read_file": return ("Reading \(file("path"))", nil, nil, "doc.text")
         case "list_folder": return ("Looking in \(file("path"))", nil, nil, "folder")
         case "find_files": return ("Searching your files", "\u{201C}\(s("query"))\u{201D}", nil, "magnifyingglass")
+        case "dev": return ("Git: \(s("action").replacingOccurrences(of: "_", with: " "))", (s("path") as NSString).lastPathComponent, nil, "chevron.left.forwardslash.chevron.right")
+        case "http_request": return ("\(s("method").uppercased()) \(URL(string: s("url"))?.host ?? "request")", s("url"), nil, "network")
+        case "sqlite": return ("Querying \((s("path") as NSString).lastPathComponent)", s("query"), nil, "cylinder")
+        case "save_document": return ("Saving \(s("name"))", nil, nil, "doc.badge.plus")
+        case "mail_draft": return ("Drafting an email", s("subject"), nil, "envelope.badge")
+        case "read_feed": return ("Reading \(URL(string: s("url"))?.host ?? "a feed")", nil, nil, "dot.radiowaves.up.forward")
+        case "spotify": return ("Spotify: \(s("action").replacingOccurrences(of: "_", with: " "))", s("value").isEmpty ? nil : s("value"), nil, "music.note")
+        case "audio": return (s("action") == "noise" ? "Playing \(s("type").isEmpty ? "pink" : s("type")) noise" : "Sound: \(s("action").replacingOccurrences(of: "_", with: " "))", s("name").isEmpty ? nil : s("name"), nil, "speaker.wave.2")
         case "open_file": return ((a["reveal"] as? Bool ?? false) ? "Showing \(file("path")) in Finder" : "Opening \(file("path"))", nil, nil, "doc")
         case "mac_status": return ("Checking your Mac", nil, nil, "gauge.with.dots.needle.67percent")
         case "today_brief": return ("Preparing your briefing", nil, nil, "sun.max")
@@ -337,6 +458,47 @@ public final class ToolBox: @unchecked Sendable {
             return ToolResult(await MainActor.run { Apps.quit(app) })
         case "running_apps":
             return ToolResult(Apps.running())
+        case "ui":
+            let app = str("app").isEmpty ? nil : str("app")
+            switch str("action") {
+            case "press":
+                let t = str("target").lowercased()
+                if settings.confirmRisky || tainted, ["send", "delete", "buy", "pay", "purchase", "submit", "remove", "erase", "transfer", "confirm"].contains(where: t.contains),
+                   !(await ask("Press \u{201C}\(str("target"))\u{201D}?")) { return ToolResult("The user declined.") }
+                return ToolResult(await UIControl.press(str("target"), app: app), screenshot: true)
+            case "set_text":
+                if tainted, !(await ask("Type into \u{201C}\(str("target"))\u{201D}?\n\n\(str("text").prefix(200))")) { return ToolResult("The user declined.") }
+                return ToolResult(await UIControl.setText(str("target"), str("text"), app: app), screenshot: true)
+            case "menu":
+                return ToolResult(await UIControl.menu(str("path"), app: app), screenshot: true)
+            case "focus":
+                let name = str("app")
+                return ToolResult(await MainActor.run { UIControl.focus(name) }, screenshot: true)
+            case "window":
+                return ToolResult(await UIControl.window(str("window_action"), app: app), screenshot: true)
+            default:
+                return ToolResult(UIControl.list(app: app))
+            }
+        case "run_applescript":
+            let script = str("script")
+            let mode = settings.scriptConfirm
+            if mode == "always" || (mode == "risky" && (Scripting.isRisky(script) || tainted)) {
+                guard await ask("Run this AppleScript?\n\(str("purpose"))\n\n\(script.prefix(600))") else { return ToolResult("The user declined.") }
+            }
+            return ToolResult(await Scripting.run(script), screenshot: true)
+        case "browser":
+            switch str("action") {
+            case "tabs": return ToolResult(await Browser.tabs())
+            case "open": return ToolResult(await Browser.open(str("url")), screenshot: true)
+            case "read":
+                let cur = await Browser.current()
+                guard let url = cur.split(separator: "\n").last.map(String.init), url.hasPrefix("http") else { return ToolResult(cur) }
+                return ToolResult(cur + "\n\n" + (await Web.fetch(url)))
+            default: return ToolResult(await Browser.current())
+            }
+        case "files":
+            if tainted, !(await ask("\(str("action").capitalized) \((str("from") as NSString).lastPathComponent)?")) { return ToolResult("The user declined.") }
+            return ToolResult(await FileOps.perform(str("action"), from: str("from"), to: str("to"), name: str("name")))
         case "open_url":
             guard let u = URL(string: str("url")), ["http", "https"].contains(u.scheme) else { return ToolResult("Only http and https links are allowed.") }
             if tainted, !(await ask("Open \(u.absoluteString)? This came after reading content Jarvis can't fully trust.")) {
@@ -392,7 +554,51 @@ public final class ToolBox: @unchecked Sendable {
                   let items = try? FileManager.default.contentsOfDirectory(atPath: url.path) else { return ToolResult("That folder isn't allowed or doesn't exist.") }
             return ToolResult(items.filter { !$0.hasPrefix(".") }.sorted().prefix(150).joined(separator: "\n"))
         case "find_files":
+            if bool("in_contents") {
+                let folder = str("folder").isEmpty ? NSHomeDirectory() : (str("folder") as NSString).expandingTildeInPath
+                let out = await Run.capture("/usr/bin/mdfind", ["-onlyin", folder, str("query")], timeout: 15)
+                let lib = NSHomeDirectory() + "/Library/"
+                let hits = out.split(separator: "\n").map(String.init).filter { !$0.hasPrefix(lib) && !$0.contains("/.") }.prefix(30)
+                return ToolResult(hits.isEmpty ? "Nothing contains \u{201C}\(str("query"))\u{201D}." : hits.joined(separator: "\n"))
+            }
             return ToolResult(await Files.find(str("query"), kind: str("kind")))
+        case "dev":
+            return ToolResult(await Dev.perform(str("action"), path: str("path"), message: str("message"), confirm: { q in await ask(q) }))
+        case "http_request":
+            let method = str("method").isEmpty ? "GET" : str("method").uppercased()
+            if method != "GET" || tainted, !(await ask("Send \(method) to \(str("url"))?\n\n\(str("body").prefix(300))")) { return ToolResult("The user declined.") }
+            var headers: [String: String] = [:]
+            for line in str("headers").split(separator: "\n") {
+                let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.count == 2 { headers[parts[0]] = parts[1] }
+            }
+            return ToolResult(await HTTP.request(method: method, url: str("url"), headers: headers, body: str("body")))
+        case "sqlite":
+            return ToolResult(await SQLite.query(str("path"), str("query"), confirm: { q in await ask(q) }))
+        case "save_document":
+            let r = Documents.save(name: str("name"), format: str("format"), content: str("content"))
+            if r.hasPrefix("Saved ") {
+                let path = (String(r.dropFirst(6)) as NSString).expandingTildeInPath
+                await MainActor.run { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+            }
+            return ToolResult(r)
+        case "mail_draft":
+            return ToolResult(await Documents.mailDraft(to: str("to"), subject: str("subject"), body: str("body"), attachment: str("attachment")))
+        case "read_feed":
+            return ToolResult(await Feeds.read(str("url")))
+        case "spotify":
+            return ToolResult(await Spotify.perform(str("action"), value: str("value")))
+        case "audio":
+            switch str("action") {
+            case "use_output": return ToolResult(AudioDevices.use(str("name"), input: false))
+            case "use_input": return ToolResult(AudioDevices.use(str("name"), input: true))
+            case "noise":
+                let v = (a["volume"] as? Double) ?? (a["volume"] as? Int).map(Double.init) ?? 0.3
+                let type = str("type")
+                return ToolResult(await MainActor.run { Ambient.shared.start(type, volume: Float(v)) })
+            case "stop_noise": return ToolResult(await MainActor.run { Ambient.shared.stop() })
+            default: return ToolResult(AudioDevices.describe())
+            }
         case "open_file":
             let path = (str("path") as NSString).expandingTildeInPath
             guard path.hasPrefix(NSHomeDirectory() + "/"), FileManager.default.fileExists(atPath: path) else { return ToolResult("That file isn't in your home folder or doesn't exist.") }

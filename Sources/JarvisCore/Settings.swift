@@ -91,6 +91,10 @@ public struct JarvisSettings: Codable, Equatable {
     public var cleanupEnabled = true     // disk cleanup and folder organising
     public var shortcutsEnabled = true
     public var webReadEnabled = true     // reading web pages
+    public var computerUse = true        // screen tasks use Gemini's built-in computer use when the key has it
+    public var appControlEnabled = true
+    public var workToolsEnabled = true   // git, tests, APIs, databases, documents and feeds  // operating apps through Accessibility, AppleScript, files and the browser
+    public var scriptConfirm = "risky"   // ask before AppleScript: risky | always | never
     // Mac care
     public var healthAlerts = true
     public var showTelemetry = false     // live readings are opt-in; the main window stays clean
