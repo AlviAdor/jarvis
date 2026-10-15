@@ -28,7 +28,7 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 
 **Remembers you**
 - Keeps the conversation across restarts, so follow-ups like "and tomorrow?" just work
-- Learns about you from setup ("About you") and from what you mention, all stored on this Mac
+- Gets to know you by talking during setup: it asks out loud, you answer, and it learns your voice from those answers. It keeps learning from what you mention, all stored on this Mac
 - Adaptive colour: cyan for light work, shifting to red as work gets heavy
 
 **Models**

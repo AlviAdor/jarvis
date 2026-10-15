@@ -102,6 +102,10 @@ public final class VoiceEngine: ObservableObject {
     @Published public private(set) var hearing = false
     @Published public private(set) var level: Float = 0
     @Published public private(set) var enrollProgress: Int?   // samples captured so far while enrolling
+    /// Waiting for the user's spoken answer to a question (the getting-to-know-you chat). No wake word needed.
+    @Published public private(set) var capturing = false
+    /// The answer and the voiceprint of how it was said.
+    public var onAnswer: ((String, [Float]?) -> Void)?
     @Published public private(set) var profile: VoiceProfile? = VoiceProfile.load()
 
     public var onCommand: ((String) -> Void)?
@@ -216,6 +220,30 @@ public final class VoiceEngine: ObservableObject {
         enrollSamples = []
     }
 
+    /// Listens for one answer. Ends after the user pauses, or after `timeout` seconds of silence.
+    public func captureAnswer(timeout: TimeInterval = 15) {
+        capturing = true
+        partial = ""
+        armTimeout?.cancel()
+        armTimeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard !Task.isCancelled, let self, self.capturing, self.request == nil else { return }
+            self.capturing = false
+            self.onAnswer?("", nil)
+        }
+    }
+
+    public func stopCapture() {
+        capturing = false
+        armTimeout?.cancel()
+    }
+
+    /// Uses a voiceprint learned elsewhere, such as from the getting-to-know-you chat.
+    public func adopt(_ p: VoiceProfile) {
+        p.save()
+        profile = p
+    }
+
     public func removeProfile() {
         VoiceProfile.delete()
         profile = nil
@@ -230,7 +258,7 @@ public final class VoiceEngine: ObservableObject {
     private func beginUtterance() {
         guard running, request == nil, let recognizer, recognizer.isAvailable else { gate.detach(); return }
         // Ambient speech is ignored unless wake word listening is on or the user armed us.
-        guard wakeEnabled || armed || enrollProgress != nil else { gate.detach(); return }
+        guard wakeEnabled || armed || enrollProgress != nil || capturing else { gate.detach(); return }
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
@@ -244,7 +272,7 @@ public final class VoiceEngine: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 // Only animate for speech meant for Jarvis; background talk and the TV leave the UI alone.
-                guard self.armed || !self.partial.isEmpty || self.enrollProgress != nil else { return }
+                guard self.armed || self.capturing || !self.partial.isEmpty || self.enrollProgress != nil else { return }
                 self.level = min(1, self.gate.latestLevel * 8)
             }
         }
@@ -257,8 +285,8 @@ public final class VoiceEngine: ObservableObject {
     }
 
     private func update(_ text: String?, final: Bool) {
-        if let text, armed || containsWake(text) || enrollProgress != nil {
-            if partial.isEmpty, !armed, enrollProgress == nil { onWakeHeard?() }
+        if let text, armed || capturing || containsWake(text) || enrollProgress != nil {
+            if partial.isEmpty, !armed, !capturing, enrollProgress == nil { onWakeHeard?() }
             partial = text
         }
         guard final else { return }
@@ -270,7 +298,11 @@ public final class VoiceEngine: ObservableObject {
         level = 0
         let vector = gate.takeVector()
         gate.detach()
-        if enrollProgress != nil {
+        if capturing {
+            capturing = false
+            armTimeout?.cancel()
+            onAnswer?(heard.trimmingCharacters(in: .whitespacesAndNewlines), vector)
+        } else if enrollProgress != nil {
             collect(vector, heard: heard)
         } else if passesLock(vector) {
             deliver(heard)

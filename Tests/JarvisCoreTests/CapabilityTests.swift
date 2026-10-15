@@ -269,3 +269,46 @@ final class MemoryTests: XCTestCase {
         XCTAssertTrue(reloaded.showTelemetry)
     }
 }
+
+final class InterviewTests: XCTestCase {
+    func testNamesFromNaturalAnswers() {
+        XCTAssertEqual(Interview.name(from: "You can call me Ador."), "Ador")
+        XCTAssertEqual(Interview.name(from: "my name is alvi ador"), "Alvi")
+        XCTAssertEqual(Interview.name(from: "I'm Alvi Ador"), "Alvi Ador")
+        XCTAssertEqual(Interview.name(from: "Ador"), "Ador")
+        XCTAssertEqual(Interview.name(from: "just Mim please"), "Mim")
+    }
+
+    func testOtherAnswers() {
+        XCTAssertEqual(Interview.work(from: "I'm a computer science student at AIUB."), "computer science student at AIUB")
+        XCTAssertEqual(Interview.place(from: "I live in Dhaka, Bangladesh"), "Dhaka, Bangladesh")
+        XCTAssertEqual(Interview.focus(from: "mostly my studies and coding, and keeping the Mac clean"),
+                       ["Studies", "Coding", "Keeping my Mac healthy"])
+        XCTAssertEqual(Interview.style(from: "short and to the point please"), "brief")
+        XCTAssertEqual(Interview.style(from: "I like a bit more detail"), "detailed")
+        XCTAssertEqual(Interview.style(from: "depends"), "balanced")
+        XCTAssertEqual(Interview.notes(from: "No, that's it."), "")
+        XCTAssertEqual(Interview.notes(from: "I play football on Fridays"), "I play football on Fridays")
+    }
+
+    func testQuestionsUseTheName() {
+        XCTAssertTrue(Interview.questions(name: "Ador")[1].text.contains("Ador"))
+        XCTAssertFalse(Interview.questions(name: "")[1].text.contains(", ."))
+    }
+
+    func testRefinedProfileIsParsedSafely() {
+        let reply = """
+        ```json
+        {"name": "Ador", "work": "Computer science student at AIUB", "place": "Dhaka, Bangladesh",
+         "focus": ["Studies", "Coding", "Juggling"], "style": "brief", "notes": "Plays football on Fridays.",
+         "facts": ["User plays football on Fridays.", "User's password is 1234"]}
+        ```
+        """
+        let p = Interview.parseProfile(reply)!
+        XCTAssertEqual(p.name, "Ador")
+        XCTAssertEqual(p.focus, ["Studies", "Coding"])
+        XCTAssertEqual(p.style, "brief")
+        XCTAssertEqual(p.facts, ["User plays football on Fridays."])
+        XCTAssertNil(Interview.parseProfile("Sorry, I can't help with that."))
+    }
+}

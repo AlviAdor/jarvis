@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+- Setup is now a conversation: Jarvis asks its questions out loud, you answer by voice (or type), and it fills in your profile from what you say
+- The same answers teach Jarvis your voice, so the voiceprint comes from the person actually setting it up; "Only respond to my voice" switches on when it has enough
+- Answers are understood on the spot and tidied up by Gemini at the end, which also notes lasting facts; everything stays editable in Settings, Memory
+- "Talk with Jarvis again" in Settings reruns the conversation
+
 ## 0.5.0
 - Memory: the conversation is kept across restarts, follow-ups like "and tomorrow?" continue the last topic, and every model (including the on-device one) now gets the conversation and what Jarvis knows about you
 - Learns about you: an "About you" step in setup and in Settings, plus quiet learning of lasting facts you mention (never passwords or card numbers)

@@ -448,7 +448,10 @@ private struct MemoryTab: View {
             Section("Memory") {
                 Toggle("Remember our conversation, even after Jarvis restarts", isOn: bind(model, \.rememberConversations))
                 Toggle("Learn about me from what I say", isOn: bind(model, \.learnAboutMe))
-                Button("Start a new conversation") { model.clearHistory() }
+                HStack {
+                    Button("Talk with Jarvis again") { model.talkAgain() }
+                    Button("Start a new conversation") { model.clearHistory() }
+                }
                 Hint("Follow-ups like \u{201C}and tomorrow?\u{201D} continue the last topic. Learning uses a tiny Gemini request only when you talk about yourself, and never stores passwords or card numbers.")
             }
             Section {

@@ -78,6 +78,10 @@ final class AppModel: ObservableObject {
     @Published var voices: [VoiceOption] = []
     @Published var permissions: [PermissionItem] = []
     @Published var about = ""
+    /// True while Jarvis is talking.
+    @Published private(set) var speaking = false
+    /// Where the setup guide opens: returning users skip what they've already done.
+    var onboardingStart = 0
     /// 0 for light work, 1 for heavy work; drives the adaptive colour.
     @Published var workload: Double = 0
     // Ollama setup
@@ -122,8 +126,9 @@ final class AppModel: ObservableObject {
 
     private init() {
         termsAccepted = UserDefaults.standard.string(forKey: "jarvis.terms.version") == Terms.version
-        // Version 2 of the guide added "About you" and voice training; earlier users see it once more.
-        onboarded = UserDefaults.standard.integer(forKey: "jarvis.onboarding.version") >= 2
+        // Version 3 of the guide added the spoken getting-to-know-you chat; earlier users see that part once.
+        onboarded = UserDefaults.standard.integer(forKey: "jarvis.onboarding.version") >= 3
+        if termsAccepted { onboardingStart = 2 }
 
         store.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         usage.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
@@ -158,6 +163,7 @@ final class AppModel: ObservableObject {
         speaker.geminiKey = { [weak self] in self?.store.geminiKey ?? "" }
         speaker.onSpeakingChange = { [weak self] speaking in
             guard let self else { return }
+            self.speaking = speaking
             self.voice.suspended = speaking
             if speaking, self.phase == .idle { self.phase = .speaking }
             if !speaking, self.phase == .speaking { self.phase = .idle }
@@ -264,7 +270,7 @@ final class AppModel: ObservableObject {
 
     func finishOnboarding() {
         UserDefaults.standard.set(true, forKey: "jarvis.onboarded")
-        UserDefaults.standard.set(2, forKey: "jarvis.onboarding.version")
+        UserDefaults.standard.set(3, forKey: "jarvis.onboarding.version")
         onboarded = true
         if bundled { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
         startListening()
@@ -274,6 +280,14 @@ final class AppModel: ObservableObject {
     }
 
     func replayOnboarding() {
+        onboardingStart = 0
+        onboarded = false
+        showWindow()
+    }
+
+    /// Opens the spoken getting-to-know-you chat again.
+    func talkAgain() {
+        onboardingStart = OnboardingView.interviewStep
         onboarded = false
         showWindow()
     }
