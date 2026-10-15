@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2
+- The particle sphere follows the workload: it spins up to about four and a half times faster as work gets heavier, particles jump off the surface in bursts that grow with the load, and the ring speeds up, all in step with the colour shift from cyan to red
+- The same applies when the Mac itself is under strain; everything settles back smoothly when Jarvis is done
+
 ## 0.8.1
 - Far fewer "usage limit" stops: each tier now rotates through every model the key has, and everyday chat and web searches step up to Flash when the Lite models run out
 - Web searches start on Lite models, which have the largest free allowance, leaving Flash for screen work

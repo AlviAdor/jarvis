@@ -126,6 +126,9 @@ final class AppModel: ObservableObject {
     var busy: Bool { phase == .thinking || phase == .acting }
     private var bundled: Bool { Bundle.main.bundleURL.pathExtension == "app" }
     private var wantsTelemetry: Bool { store.value.showTelemetry && (windowVisible || quickActive) && !needsOnboarding }
+    /// How hard Jarvis (or the Mac) is working right now, 0 to 1. Drives the orb's speed and the colour.
+    var intensity: Double { max(workload, systemStrained ? 0.85 : 0) }
+
     /// The light colour while work is easy, shifting towards the heavy colour as it gets harder.
     var accent: Color {
         let s = store.value

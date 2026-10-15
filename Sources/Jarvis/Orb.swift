@@ -315,13 +315,16 @@ struct OrbView: View {
     let still: Bool
     var level: Float = 0
     var telemetry: [Double]? = nil
+    /// How heavy the work is, 0 to 1; nil follows Jarvis's own workload.
+    var intensity: Double? = nil
     @ObservedObject private var store = AppModel.shared.store
+    @ObservedObject private var app = AppModel.shared
 
     var body: some View {
         if store.value.orbStyle == "nucleus" {
             NucleusView(phase: phase, accent: accent, still: still, level: level, telemetry: telemetry)
         } else {
-            ParticleSphereView(phase: phase, accent: accent, still: still, level: level)
+            ParticleSphereView(phase: phase, accent: accent, still: still, level: level, intensity: intensity ?? app.intensity)
         }
     }
 }

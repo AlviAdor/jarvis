@@ -33,6 +33,9 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
     var targetLevel: Float = 0
     var speaking = false
     var idle = true
+    /// How heavy the current work is, 0 to 1: speeds the globe up and makes particles jump.
+    var targetIntensity: Float = 0
+    private var intensity: Float = 0
     private var speed: Float = 0.2
     private var smoothLevel: Float = 0
 
@@ -53,7 +56,8 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
         if (d.w >= 2.0) {
             float seed = d.w - 2.0;
             float a = d.x + u.ringAngle * (1.0 + 0.08 * sin(seed * 9.0));
-            float r = 1.36 + d.y + u.level * 0.06 * sin(u.time * 6.0 + seed * 20.0);
+            float r = 1.36 + d.y + u.level * 0.06 * sin(u.time * 6.0 + seed * 20.0)
+                      + u.color.w * 0.07 * sin(u.time * 9.0 + seed * 25.0);
             float3 p = float3(cos(a) * r, d.z, sin(a) * r);
             float rt = 1.18;
             p = float3(p.x, cos(rt) * p.y - sin(rt) * p.z, sin(rt) * p.y + cos(rt) * p.z);
@@ -71,8 +75,12 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
         }
         float3 p = d.xyz;
         float seed = d.w;
-        float drift = 1.0 + u.energy * 0.035 * sin(u.time * 1.3 + seed * 17.0)
-                          + u.level * 0.24 * sin(u.time * 7.0 + seed * 31.0) * (0.5 + 0.5 * sin(seed * 5.0 + u.time * 2.0));
+        float k = u.color.w;   // workload, 0 light to 1 heavy
+        // Gentle breathing at rest; under load each particle also jumps off the surface in short, staggered bursts.
+        float jump = k * 0.22 * pow(max(0.0, sin(u.time * (2.5 + 5.5 * k) + seed * 40.0)), 10.0);
+        float drift = 1.0 + u.energy * (0.03 + 0.05 * k) * sin(u.time * (1.3 + 2.5 * k) + seed * 17.0)
+                          + u.level * 0.24 * sin(u.time * 7.0 + seed * 31.0) * (0.5 + 0.5 * sin(seed * 5.0 + u.time * 2.0))
+                          + jump;
         p *= drift;
         float ca = cos(u.angle), sa = sin(u.angle);
         p = float3(ca * p.x + sa * p.z, p.y, -sa * p.x + ca * p.z);
@@ -84,7 +92,7 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
         VOut o;
         o.pos = float4(xy.x / max(u.aspect, 0.01), xy.y, 0.0, 1.0);
         o.front = clamp((p.z + 1.0) * 0.5, 0.0, 1.0);
-        o.size = u.pointSize * s * (0.45 + 0.85 * o.front);
+        o.size = u.pointSize * s * (0.45 + 0.85 * o.front) * (1.0 + 0.25 * k + 2.0 * jump);
         o.ring = 0.0;
         return o;
     }
@@ -149,13 +157,16 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         // Frame rate follows attention: smooth while Jarvis is active, gentle at rest, slower still in the background.
-        let fps = idle ? (view.window?.isKeyWindow == true ? 20 : 10) : 60
+        let resting = idle && intensity < 0.05
+        let fps = resting ? (view.window?.isKeyWindow == true ? 20 : 10) : 60
         if view.preferredFramesPerSecond != fps { view.preferredFramesPerSecond = fps }
         let now = CACurrentMediaTime()
         let dt = Float(min(now - last, 0.1))
         last = now
-        speed += (targetSpeed - speed) * min(1, dt * 2)
-        u.energy += (targetEnergy - u.energy) * min(1, dt * 2)
+        intensity += (targetIntensity - intensity) * min(1, dt * 1.5)
+        let goalSpeed = targetSpeed * (1 + 3.5 * intensity)
+        speed += (goalSpeed - speed) * min(1, dt * 2)
+        u.energy += (targetEnergy + 1.5 * intensity - u.energy) * min(1, dt * 2)
         var lvl = targetLevel
         if speaking { lvl = max(lvl, 0.18 + 0.14 * Float(sin(now * 9) * 0.5 + 0.5)) }
         smoothLevel += (lvl - smoothLevel) * min(1, dt * 10)
@@ -163,6 +174,7 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
         u.angle += dt * speed
         u.ringAngle -= dt * (0.35 + speed * 0.8)
         u.time = Float(now - start)
+        u.color.w = intensity
         let size = view.drawableSize
         u.aspect = Float(size.width / max(size.height, 1))
         u.pointSize = Float(min(size.width, size.height)) * 0.0095
@@ -185,6 +197,7 @@ struct ParticleSphereView: NSViewRepresentable {
     let accent: Color
     let still: Bool
     var level: Float = 0
+    var intensity: Double = 0
 
     final class Coordinator { var renderer: SphereRenderer? }
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -205,7 +218,8 @@ struct ParticleSphereView: NSViewRepresentable {
     func updateNSView(_ v: MTKView, context: Context) {
         guard let r = context.coordinator.renderer else { return }
         let c = NSColor(accent).usingColorSpace(.sRGB) ?? .cyan
-        r.color = SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), 1)
+        r.color = SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), r.color.w)
+        r.targetIntensity = Float(min(max(intensity, 0), 1))
         let (speed, energy): (Float, Float)
         switch phase {
         case .idle: (speed, energy) = (0.18, 0.4)
