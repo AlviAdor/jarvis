@@ -252,6 +252,8 @@ private struct VoiceTab: View {
                 Slider(value: bind(model, \.responsePause), in: 0.8...3.0) {
                     Text(String(format: "Reply after a %.1f s pause", model.store.value.responsePause))
                 }
+                Toggle("Wait longer when I pause to find a word", isOn: bind(model, \.patientListening))
+                Hint("Jarvis notices when you stop mid-sentence, say \u{201C}um\u{201D}, or repeat a word, and gives you more time to finish. It learns how you usually pause as you talk.")
                 Hint("Speech is recognized on this Mac when the on-device model is available. Nothing leaves your Mac until you say the wake word and ask something.")
             }
             Section("Recognise my voice (experimental)") {

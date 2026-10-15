@@ -422,10 +422,20 @@ final class ConversationFlowTests: XCTestCase {
         }
     }
 
+    func testHesitationGetsMoreTime() {
+        for t in ["can you open the um", "I I want to book a", "send it to the the", "what is the, how do you say", "remind me about uh"] {
+            XCTAssertTrue(VoiceEngine.soundsHesitant(t), t)
+        }
+        for t in ["what's the weather in Dhaka", "open Safari and play music", "do you know the time"] {
+            XCTAssertFalse(VoiceEngine.soundsHesitant(t), t)
+        }
+    }
+
     func testOlderSettingsMoveToTheAdaptivePause() throws {
         let old = try JSONSerialization.data(withJSONObject: ["settingsVersion": 2, "responsePause": 0.9, "showTelemetry": true])
         let s = JarvisSettings.load(from: old)
-        XCTAssertEqual(s.responsePause, 1.1)   // unfinished sentences get extra time on top
+        XCTAssertEqual(s.responsePause, 1.1)   // unfinished and hesitant sentences get extra time on top
+        XCTAssertTrue(s.patientListening)
         XCTAssertTrue(s.showTelemetry)   // version 2 already chose this, so it stays
         XCTAssertTrue(s.bargeIn)
     }

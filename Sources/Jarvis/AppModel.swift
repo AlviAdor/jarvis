@@ -170,6 +170,10 @@ final class AppModel: ObservableObject {
         }.store(in: &bag)
 
         voice.onCommand = { [weak self] text in self?.heard(text) }
+        voice.onUsualGap = { [weak self] gap in
+            guard let self, self.store.value.patientListening else { return }
+            self.store.value.learnedGap = (gap * 100).rounded() / 100
+        }
         // Warm the on-device model only once the speech is for Jarvis, not for every sound in the room.
         voice.onWakeHeard = { [weak self] in
             guard let self else { return }
@@ -313,6 +317,8 @@ final class AppModel: ObservableObject {
         voice.wakeWord = s.wakeWord
         voice.threshold = Float(s.micThreshold)
         voice.pause = s.responsePause
+        voice.patient = s.patientListening
+        voice.usualGap = s.patientListening ? s.learnedGap : 0
         voice.vocabulary = [s.userName, s.userName.split(separator: " ").first.map(String.init) ?? ""].filter { !$0.isEmpty }
         voice.bargeInEnabled = s.bargeIn
         voice.lockEnabled = s.voiceLockEnabled

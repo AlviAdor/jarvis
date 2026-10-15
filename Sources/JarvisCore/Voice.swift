@@ -23,6 +23,16 @@ final class AudioGate: @unchecked Sendable {
     var pause: TimeInterval = 1.0
     /// Extra patience while the sentence sounds unfinished ("…and", "because…").
     var extraPause: TimeInterval = 0
+    /// Someone who stops mid-sentence to find a word and then carries on gets a pause long enough to cover
+    /// gaps like the ones they've already made, so they aren't cut off.
+    var patient = true
+    /// How long this speaker usually pauses mid-sentence, learned over earlier requests.
+    var usualGap: TimeInterval = 0
+    /// The longest pause in this request after which the speaker carried on.
+    private var longestGap: TimeInterval = 0
+    private var spoke = false
+    /// When the wake word was recognised; the pause just after it is a natural one, not hesitation.
+    private var wakeAt: Date?
     /// Jarvis is talking. With `bargeIn`, the mic still listens for the user talking over it.
     var suspended = false {
         didSet { if suspended && !oldValue { echo = 0; bargeRun = 0; speakingSince = Date() } }
@@ -78,9 +88,18 @@ final class AudioGate: @unchecked Sendable {
             // Compared with the room's own background level, so a soft voice still counts as speech.
             let voiced = level > max(threshold, noiseFloor * 2.5)
             features.add(buffer, loudEnough: level > max(0.003, noiseFloor * 2.5))
-            if voiced { lastLoud = Date() }
-            let quiet = Date().timeIntervalSince(lastLoud) > max(0.7, pause + extraPause)
-            let tooLong = Date().timeIntervalSince(began) > 25
+            let now = Date()
+            if voiced {
+                let gap = now.timeIntervalSince(lastLoud)
+                if spoke, gap > 0.35 {
+                    if let w = wakeAt, abs(lastLoud.timeIntervalSince(w)) < 1.2 { wakeAt = nil }
+                    else { longestGap = max(longestGap, gap) }
+                }
+                spoke = true
+                lastLoud = now
+            }
+            let quiet = now.timeIntervalSince(lastLoud) > silenceNeeded
+            let tooLong = now.timeIntervalSince(began) > (patient ? 40 : 25)
             if (quiet || tooLong) && !ended {
                 ended = true
                 lock.unlock()
@@ -121,6 +140,27 @@ final class AudioGate: @unchecked Sendable {
         if fire { onBargeIn?() }
     }
 
+    /// The silence that ends a request: the chosen pause, more for a trailing sentence, and for a hesitant
+    /// speaker a little more than the pauses they've been making.
+    private var silenceNeeded: TimeInterval {
+        var need = max(0.7, pause + extraPause)
+        if patient {
+            let cover = max(longestGap + 0.5, usualGap + 0.3)
+            if cover > need { need = min(pause + 1.8, cover) }
+        }
+        return need
+    }
+
+    /// The wake word just ended: earlier pauses and the natural one after "Hey Jarvis" don't count.
+    func forgetGaps() {
+        lock.lock(); longestGap = 0; wakeAt = Date(); lock.unlock()
+    }
+
+    func takeGap() -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        return longestGap
+    }
+
     func takeVector() -> [Float]? {
         lock.lock(); defer { lock.unlock() }
         return features.vector()
@@ -137,6 +177,9 @@ final class AudioGate: @unchecked Sendable {
         began = Date()
         ended = false
         extraPause = 0
+        longestGap = 0
+        spoke = false
+        wakeAt = nil
         lock.unlock()
     }
 
@@ -207,10 +250,35 @@ public final class VoiceEngine: ObservableObject {
                 "who", "when", "where", "what", "how", "also", "plus", "than", "as", "it's", "i'm", "and then", "maybe", "please"].contains(last)
     }
 
+    /// Searching for a word: a filler ("um", "how do you say"), or a word said twice ("I I want", "the the").
+    nonisolated public static func soundsHesitant(_ text: String) -> Bool {
+        let words = text.lowercased().split(whereSeparator: { !$0.isLetter && $0 != "'" }).map(String.init)
+        let tail = Array(words.suffix(6))
+        guard !tail.isEmpty else { return false }
+        let fillers: Set<String> = ["um", "umm", "uh", "uhh", "uhm", "erm", "er", "hmm", "hm", "mm", "ah", "eh", "ehm"]
+        if tail.contains(where: fillers.contains) { return true }
+        let end = tail.joined(separator: " ")
+        if ["how do you say", "what's it called", "what is it called", "what do you call it", "let me think", "let me see", "i mean"]
+            .contains(where: end.hasSuffix) { return true }
+        return zip(tail, tail.dropFirst()).contains { $0 == $1 }
+    }
+
     public var pause: TimeInterval {
         get { gate.pause }
         set { gate.pause = newValue }
     }
+    /// Waits longer for someone who pauses mid-sentence to find a word.
+    public var patient: Bool {
+        get { gate.patient }
+        set { gate.patient = newValue }
+    }
+    /// How long this speaker usually pauses mid-sentence; saved so patience starts from the first request.
+    public var usualGap: TimeInterval {
+        get { gate.usualGap }
+        set { gate.usualGap = min(1.6, max(0, newValue)) }
+    }
+    /// The learned pause changed enough to be worth keeping.
+    public var onUsualGap: ((TimeInterval) -> Void)?
     public var onSpeechStart: (() -> Void)?
     /// The wake word was just heard in a sentence that's still going.
     public var onWakeHeard: (() -> Void)?
@@ -415,9 +483,13 @@ public final class VoiceEngine: ObservableObject {
         if let text, armed || capturing || containsWake(text) || enrollProgress != nil {
             if partial.isEmpty, !armed, !capturing, enrollProgress == nil { onWakeHeard?() }
             partial = text
-            // A sentence that sounds finished ends sooner; one that trails off gets more time.
+            // A sentence that sounds finished ends sooner; one that trails off gets more time, and so does
+            // someone still finding their words (the recogniser's full stop doesn't count then).
             let t = text.trimmingCharacters(in: .whitespaces)
-            gate.extraPause = Self.soundsUnfinished(text) ? 1.6 : (t.hasSuffix("?") || t.hasSuffix(".") || t.hasSuffix("!")) ? -0.6 : 0
+            var extra: TimeInterval = Self.soundsUnfinished(text) ? 1.6 : (t.hasSuffix("?") || t.hasSuffix(".") || t.hasSuffix("!")) ? -0.6 : 0
+            if gate.patient, Self.soundsHesitant(text) { extra = min(2.2, max(extra, 0) + 0.9) }
+            gate.extraPause = extra
+            if endsWithWake(t) { gate.forgetGaps() }
         }
         guard final else { return }
         let heard = text ?? partial
@@ -428,6 +500,7 @@ public final class VoiceEngine: ObservableObject {
         level = 0
         let vector = gate.takeVector()
         let audio = gate.takeRecording()
+        if armed || capturing { learnGap(gate.takeGap()) }
         lastConfidence = confidence
         lastAudio = audio
         gate.detach()
@@ -457,6 +530,18 @@ public final class VoiceEngine: ObservableObject {
             enrollSamples = []
             onEnrolled?(p != nil)
         }
+    }
+
+    /// Follows how the speaker talks: pauses mid-sentence pull the usual gap up, fluent requests let it drift down.
+    private func learnGap(_ gap: TimeInterval) {
+        let before = usualGap
+        usualGap = gap > 0.35 ? before * 0.7 + gap * 0.3 : before * 0.9
+        if abs(usualGap - before) > 0.05 { onUsualGap?(usualGap) }
+    }
+
+    private func endsWithWake(_ s: String) -> Bool {
+        guard let r = wakeRange(in: s) else { return false }
+        return s[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters)).isEmpty
     }
 
     private func containsWake(_ s: String) -> Bool {
