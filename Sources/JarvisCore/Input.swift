@@ -11,7 +11,7 @@ public enum Input {
     }
 
     /// Moves the real cursor along an eased path so the motion is visible.
-    public static func move(to p: CGPoint, duration: Double = 0.35) async {
+    public static func move(to p: CGPoint, duration: Double = 0.22) async {
         let start = CGEvent(source: nil)?.location ?? p
         let steps = max(8, Int(duration * 60))
         for i in 1...steps {
@@ -49,7 +49,7 @@ public enum Input {
                 e?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
                 post(e)
             }
-            try? await Task.sleep(nanoseconds: 15_000_000)
+            try? await Task.sleep(nanoseconds: 7_000_000)
         }
     }
 

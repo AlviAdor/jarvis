@@ -114,7 +114,7 @@ public final class ComputerUseAgent: @unchecked Sendable {
                 result["url"] = ""
                 results.append((name, id, result))
             }
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: 300_000_000)
             shot = try await Screen.capture()
             // One fresh screenshot per turn, on the last result, keeps each step light.
             body["input"] = results.enumerated().map { i, r -> [String: Any] in

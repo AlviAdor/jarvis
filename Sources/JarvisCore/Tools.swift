@@ -24,7 +24,18 @@ public final class ToolBox: @unchecked Sendable {
     /// What the user asked, so only the tool groups that could matter are sent (smaller, faster requests).
     private let hint: String
     /// Set once untrusted content (mail, files, web pages, calendar invites, command output...) has entered the conversation.
-    private var tainted = false
+    private var tainted: Bool {
+        get { taintLock.withLock { _tainted } }
+        set { taintLock.withLock { _tainted = newValue } }
+    }
+    private var _tainted = false
+    private let taintLock = NSLock()
+
+    /// Read-only lookups that can safely run at the same time when the model asks for several at once.
+    public static let parallelSafe: Set<String> = [
+        "web_search", "fetch_url", "mac_status", "read_feed", "find_files", "read_file", "list_folder",
+        "running_apps", "contacts_search", "today_brief",
+    ]
 
     public init(settings: JarvisSettings, memory: MemoryStore,
                 confirm: @escaping @Sendable (String) async -> Bool,

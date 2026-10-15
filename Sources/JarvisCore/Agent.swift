@@ -163,10 +163,29 @@ public final class GeminiAgent: @unchecked Sendable {
 
             var reply: [[String: Any]] = []
             var wantShot = false
-            for c in calls {
-                let res = await tools.execute(c.name, c.args, screen: screenSize)
-                if let done = res.finished { return done }
-                if KillSwitch.shared.tripped { return AgentOutcome(success: false, summary: "Stopped.") }
+            // Several read-only lookups at once (three cities' weather, a few pages) run side by side.
+            var results: [ToolResult] = []
+            if calls.count > 1, calls.allSatisfy({ ToolBox.parallelSafe.contains($0.name) }) {
+                let box = tools
+                let jobs = calls.map { ($0.name, $0.args) }
+                results = await withTaskGroup(of: (Int, ToolResult).self) { g in
+                    for (i, job) in jobs.enumerated() {
+                        nonisolated(unsafe) let args = job.1
+                        g.addTask { (i, await box.execute(job.0, args, screen: screenSize)) }
+                    }
+                    var out = [ToolResult](repeating: ToolResult(""), count: jobs.count)
+                    for await (i, r) in g { out[i] = r }
+                    return out
+                }
+            } else {
+                for c in calls {
+                    let res = await tools.execute(c.name, c.args, screen: screenSize)
+                    if let done = res.finished { return done }
+                    if KillSwitch.shared.tripped { return AgentOutcome(success: false, summary: "Stopped.") }
+                    results.append(res)
+                }
+            }
+            for (c, res) in zip(calls, results) {
                 var fr: [String: Any] = ["name": c.name, "response": ["result": res.text]]
                 if let id = c.id { fr["id"] = id }
                 reply.append(["functionResponse": fr])
@@ -174,12 +193,12 @@ public final class GeminiAgent: @unchecked Sendable {
             }
             // The new screenshot rides inside the last function response, as Gemini 3 expects.
             if wantShot, !imagesInside {
-                try? await Task.sleep(nanoseconds: 400_000_000)
+                try? await Task.sleep(nanoseconds: 250_000_000)
                 let shot = try await Screen.capture()
                 reply.append(GeminiClient.imagePart(shot.jpeg))
                 reply.append(["text": ScreenReader.describe(shot, screen: screenSize)])
             } else if wantShot, var last = reply.popLast(), var fr = last["functionResponse"] as? [String: Any] {
-                try? await Task.sleep(nanoseconds: 400_000_000)
+                try? await Task.sleep(nanoseconds: 250_000_000)
                 let shot = try await Screen.capture()
                 fr["parts"] = [["inlineData": ["mimeType": "image/jpeg", "data": shot.jpeg.base64EncodedString()]]]
                 if var resp = fr["response"] as? [String: Any] {
