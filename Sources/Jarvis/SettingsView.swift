@@ -246,6 +246,7 @@ private struct VoiceTab: View {
                 Slider(value: bind(model, \.micThreshold), in: 0.002...0.04) { Text("Needs louder speech") }
                 Toggle("Understand and answer in any language", isOn: bind(model, \.anyLanguage))
                 Toggle("Stop talking when I start speaking", isOn: bind(model, \.bargeIn))
+                Toggle("Play a soft sound when I've been heard", isOn: bind(model, \.soundCues))
                 Toggle("Answer by name when I say just \u{201C}\(model.store.value.wakeWord.capitalized)\u{201D}", isOn: bind(model, \.answerWhenCalled))
                 Toggle("Greet me when Jarvis starts", isOn: bind(model, \.greetOnLaunch))
                 Slider(value: bind(model, \.responsePause), in: 0.8...3.0) {

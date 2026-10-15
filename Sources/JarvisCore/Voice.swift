@@ -570,7 +570,15 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     /// Models this key can use, so the voice can move to another voice model when one runs out.
     public var knownModels: () -> [String] = { [] }
 
-    public var isSpeaking: Bool { synth.isSpeaking || (player?.isPlaying ?? false) || fetch != nil }
+    public var isSpeaking: Bool { synth.isSpeaking || (player?.isPlaying ?? false) || fetch != nil || nextPiece < pieceCount }
+
+    // Speaking while the answer is still arriving.
+    private enum Piece { case audio(Data), text(String) }
+    private var pieces: [Int: Piece] = [:]
+    private var nextPiece = 0
+    private var pieceCount = 0
+    private var partTasks: [Task<Void, Never>] = []
+    private var partSettings: JarvisSettings?
 
     public override init() {
         super.init()
@@ -652,7 +660,59 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         }
     }
 
+    /// Speaks part of an answer as soon as it's ready, in order after the parts before it. With the Gemini
+    /// voice each part is turned into audio while earlier parts play, so speech starts at the first sentence.
+    public func sayPart(_ text: String, settings s: JarvisSettings) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        let gemini = s.voiceEngine == "gemini" && !s.usageSaver && !geminiKey().isEmpty && QuotaBook.shared.usable(s.ttsModel)
+        let seq = pieceCount
+        pieceCount += 1
+        partSettings = s
+        onSpeakingChange?(true)
+        guard gemini else {
+            pieces[seq] = .text(t)
+            playNextPiece()
+            return
+        }
+        let cached = t.count <= 80 ? Self.cacheURL(t, s) : nil
+        if let cached, let wav = try? Data(contentsOf: cached) {
+            pieces[seq] = .audio(wav)
+            playNextPiece()
+            return
+        }
+        onCloudUse?()
+        let key = geminiKey(), known = knownModels()
+        partTasks.append(Task { [weak self] in
+            let wav = try? await GeminiVoice.synthesize(t, voice: s.geminiVoice, style: s.voiceStyle, model: s.ttsModel, key: key, known: known)
+            guard let self, !Task.isCancelled else { return }
+            if let wav, let cached { try? wav.write(to: cached, options: .atomic) }
+            self.pieces[seq] = wav.map { .audio($0) } ?? .text(t)
+            self.playNextPiece()
+        })
+    }
+
+    private func playNextPiece() {
+        guard player == nil, !synth.isSpeaking, let s = partSettings, let piece = pieces.removeValue(forKey: nextPiece) else { return }
+        nextPiece += 1
+        switch piece {
+        case .audio(let d):
+            guard let p = try? AVAudioPlayer(data: d) else { playNextPiece(); return }
+            p.delegate = self
+            p.volume = Float(s.voiceVolume)
+            player = p
+            p.play()
+        case .text(let t):
+            sayLocal(t, settings: s)
+        }
+    }
+
     public func stop() {
+        partTasks.forEach { $0.cancel() }
+        partTasks = []
+        pieces = [:]
+        nextPiece = 0
+        pieceCount = 0
         fetch?.cancel()
         fetch = nil
         player?.stop()
@@ -669,7 +729,10 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     }
 
     nonisolated public func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        Task { @MainActor in self.finished() }
+        Task { @MainActor in
+            self.playNextPiece()
+            self.finished()
+        }
     }
 
     nonisolated public func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {
@@ -679,6 +742,7 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     nonisolated public func audioPlayerDidFinishPlaying(_ p: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in
             self.player = nil
+            self.playNextPiece()
             self.finished()
         }
     }

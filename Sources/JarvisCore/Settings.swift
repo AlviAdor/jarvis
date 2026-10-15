@@ -2,7 +2,7 @@ import Foundation
 
 public struct JarvisSettings: Codable, Equatable {
     /// Bumped when a default changes in a way saved settings should pick up once.
-    public var settingsVersion = 4
+    public var settingsVersion = 5
     public var userName = ""
     public var answerStyle = "brief"     // brief | balanced | detailed
     // About you, so answers fit your life
@@ -61,7 +61,8 @@ public struct JarvisSettings: Codable, Equatable {
     public var answerWhenCalled = true   // "Yes, Alvi?" when you say just the wake word
     public var greetOnLaunch = true
     public var speakReplies = true
-    public var responsePause = 1.4     // seconds of silence that end what you're saying
+    public var responsePause = 1.1     // seconds of silence that end what you're saying (more when a sentence trails off)
+    public var soundCues = true        // a soft sound when a spoken request is caught
     public var bargeIn = true          // talking over Jarvis stops it
     public var hotkey = "option+space" // option+space | control+space | command+shift+j | off
     public var voiceEngine = "apple"   // apple (on this Mac) | gemini (studio voices, online)
@@ -163,6 +164,8 @@ public struct JarvisSettings: Codable, Equatable {
         if version < 3, s.responsePause < 1.4 { s.responsePause = 1.4 }
         // Version 4: the mic adapts to the room, so the fixed level can be much gentler.
         if version < 4, s.micThreshold >= 0.015 { s.micThreshold = 0.006 }
+        // Version 5: unfinished sentences now get extra time on their own, so the base pause can be shorter.
+        if version < 5, s.responsePause == 1.4 { s.responsePause = 1.1 }
         s.settingsVersion = defaults.settingsVersion
         // Gemini 2.x isn't offered to new accounts any more.
         if s.liteModel.hasPrefix("gemini-2") { s.liteModel = defaults.liteModel }

@@ -108,6 +108,7 @@ final class AppModel: ObservableObject {
     private var voiceFallbackNoted = Date.distantPast
     private var voicesOffered = Set<String>()
     private var lastWarm = Date.distantPast
+    private var lastTypingWarm = Date.distantPast
     private var systemStrained = false
     private var job: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
@@ -457,7 +458,17 @@ final class AppModel: ObservableObject {
 
     /// A spoken request. Confident English is handled as text; anything else goes to Gemini as audio,
     /// which understands most languages, so you can talk to Jarvis in yours.
+    /// The first key press warms things up the same way the wake word does.
+    func typingStarted() {
+        guard Date().timeIntervalSince(lastTypingWarm) > 30 else { return }
+        lastTypingWarm = Date()
+        LocalBrain.shared.prewarm(store.value)
+        warmCloud()
+    }
+
     private func heard(_ text: String) {
+        // A soft sound says the request was caught, before any answer arrives.
+        if store.value.soundCues { NSSound(named: "Pop")?.play() }
         let conf = voice.lastConfidence
         if store.value.anyLanguage, !store.geminiKey.isEmpty, conf > 0, conf < 0.5 || text.count < 2,
            let wav = voice.lastRecordingWAV(), wav.count > 8_000 {
@@ -801,7 +812,7 @@ final class AppModel: ObservableObject {
         guard let (stream, engine) = await LocalBrain.shared.stream(text, history: chatHistory(), settings: s, context: ctx.isEmpty ? nil : ctx, solo: solo) else {
             return .unavailable
         }
-        let streamSpeech = s.speakReplies && s.voiceEngine != "gemini"
+        let streamSpeech = s.speakReplies
         var latest = ""
         var spoken = 0
         var decided = false
@@ -838,7 +849,7 @@ final class AppModel: ObservableObject {
         if s.speakReplies {
             if streamSpeech {
                 let rest = String(final.dropFirst(spoken)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !rest.isEmpty { speaker.sayLocal(rest, settings: s) }
+                if !rest.isEmpty { speaker.sayPart(rest, settings: s) }
             } else {
                 speaker.say(Self.spoken(final), settings: s)
             }
@@ -861,8 +872,10 @@ final class AppModel: ObservableObject {
             i -= 1
         }
         guard end > start else { return start }
+        // The Gemini voice costs a request per part: the first sentence goes at once, the rest together at the end.
+        if start > 0, s.voiceEngine == "gemini", !s.usageSaver { return start }
         let sentence = String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
-        if !sentence.isEmpty { speaker.sayLocal(sentence, settings: s) }
+        if !sentence.isEmpty { speaker.sayPart(sentence, settings: s) }
         return end
     }
 
@@ -1211,10 +1224,14 @@ final class AppModel: ObservableObject {
         answer = Self.clean(t)
         overlayText = answer
         let s = store.value
-        if mode == .web, s.speakReplies, s.voiceEngine != "gemini" || s.usageSaver {
-            streamSpoken = speakSentences(answer, from: streamSpoken, s)
-            streamSpokenText = String(answer.prefix(streamSpoken))
+        // Speak as it arrives (screen work stays quiet until it's done). A new reply after a tool step starts fresh.
+        guard mode != .screen, s.speakReplies else { return }
+        if !streamSpokenText.isEmpty, !answer.hasPrefix(streamSpokenText) {
+            streamSpoken = 0
+            streamSpokenText = ""
         }
+        streamSpoken = speakSentences(answer, from: streamSpoken, s)
+        streamSpokenText = String(answer.prefix(streamSpoken))
     }
 
     private func remember(_ q: String, _ a: String, source: String, mode: String) {
@@ -1369,7 +1386,7 @@ final class AppModel: ObservableObject {
             } else if c.hasPrefix(streamSpokenText) {
                 // Part of it was already spoken while it streamed in; say the rest.
                 let rest = String(c.dropFirst(streamSpokenText.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !rest.isEmpty { speaker.sayLocal(rest, settings: store.value) }
+                if !rest.isEmpty { speaker.sayPart(rest, settings: store.value) }
             }
             streamSpokenText = ""
             streamSpoken = 0

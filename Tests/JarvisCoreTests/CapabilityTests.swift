@@ -422,10 +422,10 @@ final class ConversationFlowTests: XCTestCase {
         }
     }
 
-    func testOlderSettingsGetLongerPauses() throws {
+    func testOlderSettingsMoveToTheAdaptivePause() throws {
         let old = try JSONSerialization.data(withJSONObject: ["settingsVersion": 2, "responsePause": 0.9, "showTelemetry": true])
         let s = JarvisSettings.load(from: old)
-        XCTAssertEqual(s.responsePause, 1.4)
+        XCTAssertEqual(s.responsePause, 1.1)   // unfinished sentences get extra time on top
         XCTAssertTrue(s.showTelemetry)   // version 2 already chose this, so it stays
         XCTAssertTrue(s.bargeIn)
     }

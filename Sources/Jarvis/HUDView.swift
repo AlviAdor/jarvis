@@ -654,6 +654,7 @@ private struct Composer: View {
                         .lineLimit(1...5)
                         .focused($focused)
                         .onSubmit { send() }
+                        .onChange(of: model.typed) { _, t in if !t.isEmpty { model.typingStarted() } }
                     sendButton
                 }
                 HStack(spacing: 6) {
