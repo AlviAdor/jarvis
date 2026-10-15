@@ -1,7 +1,15 @@
 import Foundation
 
 public struct JarvisSettings: Codable, Equatable {
+    /// Bumped when a default changes in a way saved settings should pick up once.
+    public var settingsVersion = 2
     public var userName = ""
+    public var answerStyle = "brief"     // brief | balanced | detailed
+    // About you, so answers fit your life
+    public var aboutWork = ""
+    public var aboutPlace = ""
+    public var aboutFocus: [String] = []
+    public var aboutNotes = ""
     // Models
     public var modelChoice = "auto"   // auto | lite | flash | pro
     public var liteModel = "gemini-3.5-flash-lite"
@@ -53,7 +61,10 @@ public struct JarvisSettings: Codable, Equatable {
     public var webReadEnabled = true     // reading web pages
     // Mac care
     public var healthAlerts = true
-    public var showTelemetry = true
+    public var showTelemetry = false     // live readings are opt-in; the main window stays clean
+    // Memory
+    public var rememberConversations = true   // keep the conversation across launches
+    public var learnAboutMe = true            // note lasting facts about the user from conversations
     // App
     public var showInDock = true
     public var openWindowAtLaunch = true
@@ -62,12 +73,24 @@ public struct JarvisSettings: Codable, Equatable {
     public var quickPanel = true         // the shortcut opens a floating ask bar
     public var keepHistory = true        // show earlier answers from this session
     // Look
+    public var colorMode = "adaptive"    // adaptive: shifts from the light to the heavy colour as work gets harder | fixed
+    public var heavyAccentHex = "#FF3B3B"
     public var accentHex = "#3DD6F5"
     public var theme = "dark"          // dark | light | system
     public var reduceMotion = false
     public var userDetails = false     // show diagnostics
 
     public init() {}
+
+    /// The "About you" answers as one paragraph for the model.
+    public var aboutText: String {
+        var parts: [String] = []
+        if !aboutWork.isEmpty { parts.append("Does: \(aboutWork).") }
+        if !aboutPlace.isEmpty { parts.append("Based in \(aboutPlace).") }
+        if !aboutFocus.isEmpty { parts.append("Mostly wants help with: \(aboutFocus.joined(separator: ", ")).") }
+        if !aboutNotes.isEmpty { parts.append(aboutNotes) }
+        return parts.joined(separator: " ")
+    }
 
     public func claudeModelID(_ t: Tier) -> String {
         switch t {
@@ -96,6 +119,9 @@ public struct JarvisSettings: Codable, Equatable {
         for (k, v) in saved where base[k] != nil { merged[k] = v }
         guard let bytes = try? JSONSerialization.data(withJSONObject: merged),
               var s = try? JSONDecoder().decode(JarvisSettings.self, from: bytes) else { return defaults }
+        // Version 2: live Mac readings became opt-in.
+        if (saved["settingsVersion"] as? Int ?? 1) < 2 { s.showTelemetry = false }
+        s.settingsVersion = defaults.settingsVersion
         // Gemini 2.x isn't offered to new accounts any more.
         if s.liteModel.hasPrefix("gemini-2") { s.liteModel = defaults.liteModel }
         if s.flashModel.hasPrefix("gemini-2") { s.flashModel = defaults.flashModel }

@@ -142,7 +142,7 @@ final class ReadingTests: XCTestCase {
 
 final class NewToolTests: XCTestCase {
     func box(_ s: JarvisSettings = JarvisSettings(), confirm: @escaping @Sendable (String) async -> Bool = { _ in true }) -> ToolBox {
-        ToolBox(settings: s, memory: MemoryStore(), confirm: confirm, notify: { _, _ in },
+        ToolBox(settings: s, memory: MemoryStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-test-memory")), confirm: confirm, notify: { _, _ in },
                 search: { q in "results for \(q)" }, setSetting: { n, v in "set \(n)=\(v)" })
     }
 
@@ -192,5 +192,80 @@ final class NewToolTests: XCTestCase {
     func testStatusToolReportsTheMac() async {
         let r = await box().execute("mac_status", ["focus": "storage"], screen: .zero)
         XCTAssertTrue(r.text.contains("Storage:"), r.text)
+    }
+}
+
+final class MemoryTests: XCTestCase {
+    func store() -> MemoryStore {
+        MemoryStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-mem-\(UUID().uuidString)"))
+    }
+
+    func testConversationSurvivesARestart() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-mem-\(UUID().uuidString)")
+        let a = MemoryStore(directory: dir)
+        a.append(Turn(role: "user", text: "weather in Dhaka?", mode: "web"))
+        a.append(Turn(role: "assistant", text: "31 degrees and humid.", mode: "web"))
+        let b = MemoryStore(directory: dir)
+        XCTAssertEqual(b.context().map(\.text), ["weather in Dhaka?", "31 degrees and humid."])
+        XCTAssertEqual(b.context().last?.mode, "web")
+    }
+
+    func testLongPauseKeepsOnlyTheLastExchange() {
+        let m = store()
+        let old = Date().addingTimeInterval(-3 * 86_400)
+        m.append(Turn(role: "user", text: "first", at: old))
+        m.append(Turn(role: "assistant", text: "one", at: old))
+        m.append(Turn(role: "user", text: "second", at: old.addingTimeInterval(60)))
+        m.append(Turn(role: "assistant", text: "two", at: old.addingTimeInterval(61)))
+        XCTAssertEqual(m.context().map(\.text), ["second", "two"])
+        m.append(Turn(role: "user", text: "today"))
+        m.append(Turn(role: "assistant", text: "now"))
+        XCTAssertEqual(m.context().map(\.text), ["today", "now"])
+    }
+
+    func testProfileCombinesNameAboutAndFacts() {
+        let m = store()
+        m.setAbout("Does: CS student. Based in Dhaka.")
+        m.addFact("User's sister is Mim.")
+        m.addFact("user's sister is mim.")
+        XCTAssertEqual(m.facts.count, 1)
+        let p = m.profile(name: "Ador")
+        for part in ["Ador", "CS student", "Mim"] { XCTAssertTrue(p.contains(part), part) }
+    }
+
+    func testFollowUpsAreRecognised() {
+        for t in ["and tomorrow?", "what about Chittagong", "send it to her", "do the same for Desktop", "tell me more", "why?"] {
+            XCTAssertTrue(Router.isFollowUp(t), t)
+        }
+        for t in ["what's the capital of Japan", "open Safari", "how's my battery doing today with all these apps open right now"] {
+            XCTAssertFalse(Router.isFollowUp(t), t)
+        }
+    }
+
+    func testLearnerKeepsOnlyNewSafeFacts() {
+        XCTAssertTrue(Learner.worthChecking("I study computer science at AIUB"))
+        XCTAssertFalse(Learner.worthChecking("what's the weather"))
+        let found = Learner.parse("- User studies at AIUB.\n- User's password is hunter2\nUser's sister is Mim\nNONE", known: ["User's sister is Mim."])
+        XCTAssertEqual(found, ["User studies at AIUB."])
+        XCTAssertTrue(Learner.parse("NONE", known: []).isEmpty)
+    }
+
+    func testAboutAnswersBecomeAParagraph() {
+        var s = JarvisSettings()
+        s.aboutWork = "CS student at AIUB"
+        s.aboutPlace = "Dhaka"
+        s.aboutFocus = ["Studies", "Coding"]
+        XCTAssertEqual(s.aboutText, "Does: CS student at AIUB. Based in Dhaka. Mostly wants help with: Studies, Coding.")
+    }
+
+    func testOldSettingsHideTelemetryOnce() throws {
+        let old = try JSONSerialization.data(withJSONObject: ["showTelemetry": true, "accentHex": "#8B7CFF"])
+        let s = JarvisSettings.load(from: old)
+        XCTAssertFalse(s.showTelemetry)
+        XCTAssertEqual(s.accentHex, "#8B7CFF")
+        var again = s
+        again.showTelemetry = true
+        let reloaded = JarvisSettings.load(from: try JSONEncoder().encode(again))
+        XCTAssertTrue(reloaded.showTelemetry)
     }
 }

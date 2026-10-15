@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+- Memory: the conversation is kept across restarts, follow-ups like "and tomorrow?" continue the last topic, and every model (including the on-device one) now gets the conversation and what Jarvis knows about you
+- Learns about you: an "About you" step in setup and in Settings, plus quiet learning of lasting facts you mention (never passwords or card numbers)
+- Voice training during setup; once Jarvis has learned your voice, "Only respond to my voice" switches on
+- New nucleus orb: glowing core, electrons on three tilted orbits and a particle cloud, all on the GPU
+- Adaptive colour: cyan for light work shifting to red for heavy work (screen control, deep thinking, or a Mac under strain); both colours customisable, or keep one fixed colour
+- The window's glass now meets macOS's own rounded corners exactly, with no transparent wedges
+- Live Mac readings are off by default; turn them on in Settings
+- Ollama: preferred automatically when running; install, start and download models from Settings with a progress bar; reasoning models skip their hidden thinking for faster replies
+
 ## 0.4.0
 **Fixes**
 - Permissions no longer get asked for again after every build. Builds are signed with a stable local identity, the installer clears records left by older builds, and Settings has a Repair permissions button

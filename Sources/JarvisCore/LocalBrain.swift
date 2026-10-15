@@ -25,6 +25,7 @@ public final class LocalBrain: @unchecked Sendable {
     ESCALATE_HARD for long writing, code, maths, or careful multi-step reasoning.
     If you are not certain a fact is correct, reply ESCALATE_WEB.
     When live data about this Mac is included, answer questions about the Mac from it directly.
+    Use what you know about the user and the conversation so far; a short follow-up continues the previous topic.
     """
 
     private let lock = NSLock()
@@ -60,12 +61,21 @@ public final class LocalBrain: @unchecked Sendable {
         return models
     }
 
-    /// Small, quick models first: they reply in well under a second once loaded.
+    /// Capable but quick models first; they reply in well under a second once loaded.
     public static func pickSmall(_ models: [String]) -> String? {
-        let order = ["llama3.2:3b", "qwen3:4b", "gemma3:4b", "phi4-mini", "qwen2.5:3b", "llama3.2", "gemma3", "qwen3", "phi", "mistral"]
-        for p in order { if let m = models.first(where: { $0.hasPrefix(p) }) { return m } }
-        return models.first
+        let usable = models.filter { !$0.contains("embed") }
+        let order = ["qwen3:8b", "qwen3:4b", "gemma3:4b", "llama3.2:3b", "phi4-mini", "qwen2.5:7b", "qwen2.5:3b", "llama3.1:8b",
+                     "qwen3", "gemma3", "llama3.2", "phi", "mistral"]
+        for p in order { if let m = usable.first(where: { $0.hasPrefix(p) }) { return m } }
+        return usable.first
     }
+
+    /// Models worth suggesting, with their approximate download size.
+    public static let suggested: [(name: String, label: String, size: String)] = [
+        ("qwen3:8b", "Smart: best answers, still quick on Apple silicon", "5.2 GB"),
+        ("qwen3:4b", "Fast: lighter, replies almost instantly", "2.6 GB"),
+        ("llama3.2:3b", "Fastest: smallest download", "2.0 GB"),
+    ]
 
     public func resolve(_ s: JarvisSettings) async -> (Engine, String)? {
         func ollama() async -> (Engine, String)? {
@@ -78,9 +88,60 @@ public final class LocalBrain: @unchecked Sendable {
         case "apple": return appleStatus().ready ? (.apple, "apple-on-device") : nil
         case "ollama": return await ollama()
         default:
-            if appleStatus().ready { return (.apple, "apple-on-device") }
-            return await ollama()
+            // Ollama runs larger, smarter models, so it wins whenever it's installed and running.
+            if let o = await ollama() { return o }
+            return appleStatus().ready ? (.apple, "apple-on-device") : nil
         }
+    }
+
+    // MARK: Ollama setup
+
+    public static var ollamaInstalled: Bool {
+        ["/Applications/Ollama.app", "/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"].contains { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Starts Ollama in the background if it's installed but not running.
+    public func startOllama() async -> Bool {
+        if await ollamaReachable() { return true }
+        if FileManager.default.fileExists(atPath: "/Applications/Ollama.app") {
+            _ = await Run.capture("/usr/bin/open", ["-g", "-a", "Ollama"])
+        } else if let bin = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"].first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            _ = await Run.capture("/bin/sh", ["-c", "nohup '\(bin)' serve >/dev/null 2>&1 &"])
+        } else {
+            return false
+        }
+        for _ in 0..<20 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if await ollamaReachable() { return true }
+        }
+        return false
+    }
+
+    public func ollamaReachable() async -> Bool {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/version")!)
+        req.timeoutInterval = 1
+        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        return (resp as? HTTPURLResponse)?.statusCode == 200
+    }
+
+    /// Downloads a model through Ollama, reporting progress from 0 to 1.
+    public func pull(_ model: String, progress: @escaping @Sendable (Double, String) -> Void) async throws {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/pull")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.timeoutInterval = 3600
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["model": model, "stream": true])
+        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw LLMError.other("Ollama couldn't start the download.") }
+        for try await line in bytes.lines {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            if let err = obj["error"] as? String { throw LLMError.other(err) }
+            let status = obj["status"] as? String ?? ""
+            let total = (obj["total"] as? NSNumber)?.doubleValue ?? 0
+            let done = (obj["completed"] as? NSNumber)?.doubleValue ?? 0
+            progress(total > 0 ? done / total : (status == "success" ? 1 : 0), status)
+        }
+        lock.withLock { cachedOllama = (.distantPast, []) }
     }
 
     // MARK: Speed
@@ -120,13 +181,13 @@ public final class LocalBrain: @unchecked Sendable {
     public func stream(_ prompt: String, history: [(role: String, text: String)], settings s: JarvisSettings,
                        context: String? = nil) async -> (AsyncThrowingStream<String, Error>, Engine)? {
         guard let (engine, model) = await resolve(s) else { return nil }
-        let live = context.map { "Live data about this Mac right now:\n\($0)\n\n" } ?? ""
+        let live = context.map { "\($0)\n\n" } ?? ""
         switch engine {
         case .apple:
             #if canImport(FoundationModels)
             if #available(macOS 26.0, *) {
                 var text = live
-                for h in history.suffix(6) { text += (h.role == "user" ? "User: " : "Jarvis: ") + h.text + "\n" }
+                for h in history.suffix(10) { text += (h.role == "user" ? "User: " : "Jarvis: ") + h.text + "\n" }
                 text += text.isEmpty ? prompt : "User: \(prompt)"
                 return (appleStream(text), .apple)
             }
@@ -134,7 +195,7 @@ public final class LocalBrain: @unchecked Sendable {
             return nil
         case .ollama:
             var messages: [[String: String]] = [["role": "system", "content": Self.instructions + (live.isEmpty ? "" : "\n\n" + live)]]
-            for h in history.suffix(6) { messages.append(["role": h.role == "user" ? "user" : "assistant", "content": h.text]) }
+            for h in history.suffix(10) { messages.append(["role": h.role == "user" ? "user" : "assistant", "content": h.text]) }
             messages.append(["role": "user", "content": prompt])
             return (ollamaStream(model: model, messages: messages), .ollama)
         }
@@ -170,10 +231,13 @@ public final class LocalBrain: @unchecked Sendable {
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "content-type")
                     req.timeoutInterval = 60
-                    req.httpBody = try JSONSerialization.data(withJSONObject: [
-                        "model": model, "messages": messages, "stream": true, "keep_alive": "10m",
-                        "options": ["num_predict": 300, "temperature": 0.4],
-                    ] as [String: Any])
+                    var body: [String: Any] = [
+                        "model": model, "messages": messages, "stream": true, "keep_alive": "15m",
+                        "options": ["num_predict": 400, "temperature": 0.5],
+                    ]
+                    // Reasoning models think out loud first; for a voice assistant that's just delay.
+                    if ["qwen3", "deepseek-r1", "magistral"].contains(where: { model.hasPrefix($0) }) { body["think"] = false }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: body)
                     let (bytes, resp) = try await URLSession.shared.bytes(for: req)
                     guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw LLMError.other("Ollama didn't accept the request.") }
                     var text = ""

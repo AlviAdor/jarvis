@@ -6,11 +6,11 @@ import JarvisCore
 /// First-run guide. Nothing works until the terms are accepted.
 struct OnboardingView: View {
     @EnvironmentObject var model: AppModel
-    @State private var step = 0
+    @State private var step = AppModel.shared.termsAccepted ? 2 : 0
     @State private var adult = false
     @State private var agreed = false
 
-    private let titles = ["Welcome", "Terms", "Gemini", "Claude", "Permissions", "Voice", "How it works", "Ready"]
+    private let titles = ["Welcome", "Terms", "About you", "Gemini", "Claude", "Permissions", "Voice", "How it works", "Ready"]
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -60,11 +60,12 @@ struct OnboardingView: View {
         switch step {
         case 0: WelcomePage()
         case 1: TermsPage(adult: $adult, agreed: $agreed)
-        case 2: GeminiPage()
-        case 3: ClaudePage()
-        case 4: PermissionsPage()
-        case 5: VoicePage()
-        case 6: TourPage()
+        case 2: AboutPage()
+        case 3: GeminiPage()
+        case 4: ClaudePage()
+        case 5: PermissionsPage()
+        case 6: VoicePage()
+        case 7: TourPage()
         default: ReadyPage()
         }
     }
@@ -72,7 +73,7 @@ struct OnboardingView: View {
     private var canContinue: Bool {
         switch step {
         case 1: return adult && agreed
-        case 2: return !model.store.geminiKey.isEmpty || !model.store.claudeKey.isEmpty
+        case 3: return !model.store.geminiKey.isEmpty || !model.store.claudeKey.isEmpty
         default: return true
         }
     }
@@ -84,12 +85,12 @@ struct OnboardingView: View {
                     .keyboardShortcut(.cancelAction)
             }
             Spacer()
-            if step == 2 && !canContinue {
+            if step == 3 && !canContinue {
                 Text("Add a key to continue")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if step == 3 && model.store.claudeKey.isEmpty {
+            if step == 4 && model.store.claudeKey.isEmpty {
                 Button("Skip, use Gemini only") { step += 1 }
             }
             Button(step == titles.count - 1 ? "Start Jarvis" : (step == 1 ? "I agree" : "Continue")) {
@@ -409,12 +410,21 @@ struct VoicePicker: View {
     }
 }
 
+private struct AboutPage: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PageTitle(title: "Tell Jarvis about you", subtitle: "A minute now makes every answer more useful. Skip anything you like.")
+            AboutYouForm()
+        }
+    }
+}
+
 private struct VoicePage: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            PageTitle(title: "Your Jarvis voice", subtitle: "Pick how Jarvis sounds and how you wake it.")
+            PageTitle(title: "Your Jarvis voice", subtitle: "Pick how Jarvis sounds, how you wake it, and teach it your voice.")
             VoicePicker()
             Divider()
             Toggle("Wake Jarvis by saying its name", isOn: Binding(get: { model.store.value.wakeWordEnabled }, set: { model.store.value.wakeWordEnabled = $0 }))
@@ -427,9 +437,15 @@ private struct VoicePage: View {
                 ForEach(HotKey.labels, id: \.id) { Text($0.label).tag($0.id) }
             }
             .frame(width: 280)
-            TextField("Your name (optional)", text: Binding(get: { model.store.value.userName }, set: { model.store.value.userName = $0 }))
-                .frame(width: 280)
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Recognise my voice").font(.headline)
+                Text("Read five short lines so Jarvis knows how you sound. Then it only reacts to you, not to other people or the TV.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                VoiceMatchControls(voice: model.voice)
+            }
         }
+        .onAppear { if !model.voice.running { model.startListening() } }
     }
 }
 

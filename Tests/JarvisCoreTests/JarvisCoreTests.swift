@@ -134,7 +134,7 @@ final class SchedulerTests: XCTestCase {
 final class ToolTests: XCTestCase {
     func box(_ s: JarvisSettings = JarvisSettings(), confirm: @escaping @Sendable (String) async -> Bool = { _ in true },
              events: @escaping @Sendable (ActionEvent) -> Void = { _ in }, mcp: [MCPTool] = []) -> ToolBox {
-        ToolBox(settings: s, memory: MemoryStore(), confirm: confirm, notify: { _, _ in }, onAction: events, mcp: mcp)
+        ToolBox(settings: s, memory: MemoryStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-test-memory")), confirm: confirm, notify: { _, _ in }, onAction: events, mcp: mcp)
     }
 
     func testAnthropicSchemaIsLowercasedAndMatchesDeclarations() {

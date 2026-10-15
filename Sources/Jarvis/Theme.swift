@@ -12,6 +12,16 @@ extension Color {
                   blue: Double(v & 0xFF) / 255)
     }
 
+    /// Mixes two colours in sRGB; t = 0 gives `a`, t = 1 gives `b`.
+    static func blend(_ a: Color, _ b: Color, _ t: Double) -> Color {
+        guard let x = NSColor(a).usingColorSpace(.sRGB), let y = NSColor(b).usingColorSpace(.sRGB) else { return a }
+        let k = CGFloat(min(max(t, 0), 1))
+        return Color(.sRGB,
+                     red: Double(x.redComponent + (y.redComponent - x.redComponent) * k),
+                     green: Double(x.greenComponent + (y.greenComponent - x.greenComponent) * k),
+                     blue: Double(x.blueComponent + (y.blueComponent - x.blueComponent) * k))
+    }
+
     var hex: String {
         guard let c = NSColor(self).usingColorSpace(.sRGB) else { return "#3DD6F5" }
         return String(format: "#%02X%02X%02X", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
@@ -110,35 +120,27 @@ struct VisualEffect: NSViewRepresentable {
 }
 
 /// The window's own surface: glass, a faint circuit grid and an accent glow that warms up while Jarvis works.
+/// It fills the whole window and leaves the rounding to macOS, so its edge always meets the window's own
+/// corners exactly; on macOS 26 the glass follows the window's corner shape too.
 struct GlassBackdrop: View {
     let accent: Color
     var busy = false
-    var radius: CGFloat = 30
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         ZStack {
             if #available(macOS 26.0, *) {
-                Color.clear.glassEffect(.regular.tint(scheme == .dark ? .black.opacity(0.42) : .white.opacity(0.25)), in: shape)
+                Color.clear.glassEffect(.regular.tint(scheme == .dark ? .black.opacity(0.42) : .white.opacity(0.25)), in: ConcentricRectangle())
             } else {
-                VisualEffect(material: .hudWindow).clipShape(shape)
-                shape.fill(scheme == .dark ? Color.black.opacity(0.25) : Color.white.opacity(0.2))
+                VisualEffect(material: .hudWindow)
+                Rectangle().fill(scheme == .dark ? Color.black.opacity(0.25) : Color.white.opacity(0.2))
             }
             CircuitGrid()
                 .stroke(accent.opacity(scheme == .dark ? 0.07 : 0.06), lineWidth: 0.6)
-                .clipShape(shape)
                 .drawingGroup()
             RadialGradient(colors: [accent.opacity(busy ? 0.26 : 0.14), .clear], center: .init(x: 0.5, y: 0.26), startRadius: 10, endRadius: 360)
-                .clipShape(shape)
                 .animation(.easeInOut(duration: 0.8), value: busy)
         }
-        .overlay(
-            shape.strokeBorder(
-                LinearGradient(colors: [.white.opacity(0.28), accent.opacity(0.3), .white.opacity(0.06)],
-                               startPoint: .top, endPoint: .bottom),
-                lineWidth: 1)
-        )
         .ignoresSafeArea()
     }
 }

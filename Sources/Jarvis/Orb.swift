@@ -3,24 +3,34 @@ import AppKit
 import QuartzCore
 import JarvisCore
 
-/// The Jarvis orb, built from Core Animation layers. Its spin, pulse and breathing run in the
-/// system render server, so the app does almost no work per frame even while the orb is visible.
+/// The Jarvis orb: a glowing nucleus with electrons on three tilted orbits and a fine particle cloud.
+/// Every motion is a Core Animation animation running in the system's render server, so the app itself
+/// does almost no work per frame. Activity speeds the atom up; your voice makes it swell.
 final class OrbLayerView: NSView {
-    private let levelLayer = CALayer()    // swells with your voice
-    private let pulseLayer = CALayer()    // breathes
-    private let spinLayer = CALayer()     // everything that rotates; its speed follows the phase
+    private let levelLayer = CALayer()     // swells with your voice
+    private let pulseLayer = CALayer()     // breathes
+    private let atomLayer = CALayer()      // orbits and electrons; its speed follows the phase
+    private let precess = CALayer()        // slowly turns the whole atom
     private let halo = CAGradientLayer()
+    private let cloud = CAEmitterLayer()
+    private let core = CAGradientLayer()
+    private let coreGlow = CALayer()
     private let tickRing = CALayer()
     private let ticksMajor = CAShapeLayer()
     private let ticksMinor = CAShapeLayer()
-    private var arcs: [CAShapeLayer] = []
-    private let core = CAGradientLayer()
+    private var orbits: [CAShapeLayer] = []
+    private var electrons: [CALayer] = []
     private var ringTracks: [CAShapeLayer] = []   // live CPU, memory and battery around the orb
     private var ringValues: [CAShapeLayer] = []
 
     private var accent: NSColor = .cyan
     private var phase: Phase?
     private var still = false
+    private var builtFor: CGSize = .zero
+    private var colorsReady = false
+
+    private static let tilts: [CGFloat] = [0, .pi / 3, 2 * .pi / 3]
+    private static let periods: [Double] = [2.6, 3.4, 4.3]
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -33,28 +43,57 @@ final class OrbLayerView: NSView {
 
     private func build() {
         guard let root = layer else { return }
+        root.addSublayer(tickRing)
+        tickRing.addSublayer(ticksMinor)
+        tickRing.addSublayer(ticksMajor)
+        for l in [ticksMajor, ticksMinor] { l.fillColor = nil; l.lineWidth = 1 }
+
         root.addSublayer(levelLayer)
         levelLayer.addSublayer(pulseLayer)
         halo.type = .radial
         pulseLayer.addSublayer(halo)
-        pulseLayer.addSublayer(spinLayer)
-        spinLayer.addSublayer(tickRing)
-        tickRing.addSublayer(ticksMinor)
-        tickRing.addSublayer(ticksMajor)
+        pulseLayer.addSublayer(cloud)
+        pulseLayer.addSublayer(atomLayer)
+        atomLayer.addSublayer(precess)
         for i in 0..<3 {
-            let a = CAShapeLayer()
-            a.fillColor = nil
-            a.lineCap = .round
-            a.lineWidth = i == 0 ? 3 : 1.6
-            arcs.append(a)
-            spinLayer.addSublayer(a)
+            let o = CAShapeLayer()
+            o.fillColor = nil
+            o.lineWidth = i == 0 ? 1.3 : 1
+            orbits.append(o)
+            precess.addSublayer(o)
         }
-        ticksMajor.fillColor = nil
-        ticksMinor.fillColor = nil
-        ticksMajor.lineWidth = 1
-        ticksMinor.lineWidth = 1
+        for _ in 0..<4 {
+            let e = CALayer()
+            e.shadowOpacity = 1
+            e.shadowRadius = 5
+            e.shadowOffset = .zero
+            electrons.append(e)
+            precess.addSublayer(e)
+        }
+        coreGlow.shadowOpacity = 1
+        coreGlow.shadowOffset = .zero
+        pulseLayer.addSublayer(coreGlow)
         core.type = .radial
         pulseLayer.addSublayer(core)
+
+        let cell = CAEmitterCell()
+        cell.name = "dot"
+        cell.contents = Self.dotImage
+        cell.birthRate = 1
+        cell.lifetime = 2.2
+        cell.lifetimeRange = 0.8
+        cell.velocity = 9
+        cell.velocityRange = 7
+        cell.emissionRange = .pi * 2
+        cell.scale = 0.09
+        cell.scaleRange = 0.05
+        cell.alphaSpeed = -0.42
+        cloud.emitterCells = [cell]
+        cloud.emitterShape = .circle
+        cloud.emitterMode = .volume
+        cloud.renderMode = .additive
+        cloud.birthRate = 12
+
         for _ in 0..<3 {
             let track = CAShapeLayer(), value = CAShapeLayer()
             for l in [track, value] {
@@ -68,8 +107,39 @@ final class OrbLayerView: NSView {
             ringTracks.append(track)
             ringValues.append(value)
         }
-        startAnimations()
+
+        spin(tickRing, seconds: 48, clockwise: true)
+        spin(precess, seconds: 36, clockwise: false)
+        let p = CABasicAnimation(keyPath: "transform.scale")
+        p.fromValue = 0.97
+        p.toValue = 1.03
+        p.duration = 1.9
+        p.autoreverses = true
+        p.repeatCount = .infinity
+        p.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        p.isRemovedOnCompletion = false
+        pulseLayer.add(p, forKey: "pulse")
+        let g = CABasicAnimation(keyPath: "shadowRadius")
+        g.fromValue = 10
+        g.toValue = 18
+        g.duration = 1.9
+        g.autoreverses = true
+        g.repeatCount = .infinity
+        g.isRemovedOnCompletion = false
+        coreGlow.add(g, forKey: "glow")
     }
+
+    /// A soft round particle, drawn once.
+    private static let dotImage: CGImage? = {
+        let size = 32
+        guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        let colors = [CGColor(gray: 1, alpha: 1), CGColor(gray: 1, alpha: 0)] as CFArray
+        guard let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) else { return nil }
+        let c = CGPoint(x: size / 2, y: size / 2)
+        ctx.drawRadialGradient(grad, startCenter: c, startRadius: 0, endCenter: c, endRadius: CGFloat(size) / 2, options: [])
+        return ctx.makeImage()
+    }()
 
     private func spin(_ layer: CALayer, seconds: Double, clockwise: Bool) {
         let a = CABasicAnimation(keyPath: "transform.rotation.z")
@@ -81,36 +151,27 @@ final class OrbLayerView: NSView {
         layer.add(a, forKey: "spin")
     }
 
-    private func startAnimations() {
-        spin(tickRing, seconds: 42, clockwise: true)
-        spin(arcs[0], seconds: 9, clockwise: false)
-        spin(arcs[1], seconds: 13, clockwise: true)
-        spin(arcs[2], seconds: 17, clockwise: false)
-        let p = CABasicAnimation(keyPath: "transform.scale")
-        p.fromValue = 0.965
-        p.toValue = 1.035
-        p.duration = 1.8
-        p.autoreverses = true
-        p.repeatCount = .infinity
-        p.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        p.isRemovedOnCompletion = false
-        pulseLayer.add(p, forKey: "pulse")
+    /// An orbit: an ellipse around the centre, tilted by `angle`.
+    private static func orbitPath(center c: CGPoint, rx: CGFloat, ry: CGFloat, angle: CGFloat) -> CGPath {
+        var t = CGAffineTransform(translationX: c.x, y: c.y).rotated(by: angle)
+        return CGPath(ellipseIn: CGRect(x: -rx, y: -ry, width: rx * 2, height: ry * 2), transform: &t)
     }
 
     override func layout() {
         super.layout()
+        let b = bounds
+        guard b.width > 4, b.size != builtFor else { return }
+        builtFor = b.size
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let b = bounds
         let c = CGPoint(x: b.midX, y: b.midY)
         let base = min(b.width, b.height) / 2
-        for l in [levelLayer, pulseLayer, spinLayer, halo, tickRing, ticksMajor, ticksMinor] as [CALayer] { l.frame = b }
-        arcs.forEach { $0.frame = b }
+        for l in [levelLayer, pulseLayer, atomLayer, precess, halo, tickRing, ticksMajor, ticksMinor, cloud] as [CALayer] { l.frame = b }
 
         let major = CGMutablePath(), minor = CGMutablePath()
         for i in 0..<60 {
             let a = Double(i) / 60 * 2 * .pi
-            let r1 = base * 0.86, r2 = r1 - (i % 5 == 0 ? 7 : 3)
+            let r1 = base * 0.88, r2 = r1 - (i % 5 == 0 ? 6 : 2.5)
             let path = i % 5 == 0 ? major : minor
             path.move(to: CGPoint(x: c.x + cos(a) * r1, y: c.y + sin(a) * r1))
             path.addLine(to: CGPoint(x: c.x + cos(a) * r2, y: c.y + sin(a) * r2))
@@ -118,19 +179,41 @@ final class OrbLayerView: NSView {
         ticksMajor.path = major
         ticksMinor.path = minor
 
-        for (i, arc) in arcs.enumerated() {
-            let r = base * (0.42 + 0.14 * CGFloat(i))
-            let sweep = 1.2 + 0.9 * CGFloat(i)
-            let path = CGMutablePath()
-            for k in 0..<2 {
-                let start = CGFloat(k) * .pi + CGFloat(i) * 0.7
-                path.move(to: CGPoint(x: c.x + cos(start) * r, y: c.y + sin(start) * r))
-                path.addArc(center: c, radius: r, startAngle: start, endAngle: start + sweep, clockwise: false)
-            }
-            arc.path = path
+        // Orbits and the electrons travelling along them.
+        let rx = base * 0.7, ry = base * 0.25
+        for (i, o) in orbits.enumerated() {
+            o.frame = b
+            o.path = Self.orbitPath(center: c, rx: rx, ry: ry, angle: Self.tilts[i])
+        }
+        let dot = max(4, base * 0.055)
+        for (i, e) in electrons.enumerated() {
+            let orbit = i % 3
+            e.bounds = CGRect(x: 0, y: 0, width: dot, height: dot)
+            e.cornerRadius = dot / 2
+            e.position = c
+            let a = CAKeyframeAnimation(keyPath: "position")
+            a.path = Self.orbitPath(center: c, rx: rx, ry: ry, angle: Self.tilts[orbit])
+            a.duration = Self.periods[orbit]
+            a.calculationMode = .paced
+            a.repeatCount = .infinity
+            a.isRemovedOnCompletion = false
+            a.timeOffset = i >= 3 ? Self.periods[orbit] / 2 : Double(i) * 0.7   // the fourth rides opposite the first
+            e.add(a, forKey: "orbit")
         }
 
-        // Three 110° arcs with gaps, starting at the top and running clockwise.
+        let coreR = base * 0.2
+        core.frame = CGRect(x: c.x - coreR, y: c.y - coreR, width: coreR * 2, height: coreR * 2)
+        core.cornerRadius = coreR
+        core.startPoint = CGPoint(x: 0.5, y: 0.5)
+        core.endPoint = CGPoint(x: 1, y: 1)
+        coreGlow.frame = core.frame
+        coreGlow.cornerRadius = coreR
+        halo.startPoint = CGPoint(x: 0.5, y: 0.5)
+        halo.endPoint = CGPoint(x: 1, y: 1)
+        cloud.emitterPosition = c
+        cloud.emitterSize = CGSize(width: coreR * 2.6, height: coreR * 2.6)
+
+        // Three 110° telemetry arcs with gaps, starting at the top and running clockwise.
         let ringR = base * 0.975
         for i in 0..<3 {
             let start = CGFloat.pi / 2 - CGFloat(i) * 2 * .pi / 3 - 0.09
@@ -142,33 +225,34 @@ final class OrbLayerView: NSView {
             ringTracks[i].path = path
             ringValues[i].path = path
         }
-
-        let coreR = base * 0.22
-        core.frame = CGRect(x: c.x - coreR, y: c.y - coreR, width: coreR * 2, height: coreR * 2)
-        core.startPoint = CGPoint(x: 0.5, y: 0.5)
-        core.endPoint = CGPoint(x: 1, y: 1)
-        halo.startPoint = CGPoint(x: 0.5, y: 0.5)
-        halo.endPoint = CGPoint(x: 1, y: 1)
         CATransaction.commit()
-        applyColors()
+        applyColors(animated: false)
     }
 
-    private func applyColors() {
+    private func applyColors(animated: Bool) {
         CATransaction.begin()
-        CATransaction.setDisableActions(true)
+        if animated { CATransaction.setAnimationDuration(0.9) } else { CATransaction.setDisableActions(true) }
         let a = accent.usingColorSpace(.sRGB) ?? accent
-        halo.colors = [a.withAlphaComponent(0.5).cgColor, a.withAlphaComponent(0.1).cgColor, NSColor.clear.cgColor]
-        halo.locations = [0, 0.55, 1]
-        ticksMajor.strokeColor = a.withAlphaComponent(0.55).cgColor
-        ticksMinor.strokeColor = a.withAlphaComponent(0.22).cgColor
-        for (i, arc) in arcs.enumerated() { arc.strokeColor = a.withAlphaComponent(0.9 - 0.22 * CGFloat(i)).cgColor }
-        core.colors = [NSColor.white.withAlphaComponent(0.95).cgColor, a.cgColor, a.withAlphaComponent(0.35).cgColor]
-        core.locations = [0, 0.55, 1]
+        halo.colors = [a.withAlphaComponent(0.42).cgColor, a.withAlphaComponent(0.08).cgColor, NSColor.clear.cgColor]
+        halo.locations = [0, 0.6, 1]
+        ticksMajor.strokeColor = a.withAlphaComponent(0.5).cgColor
+        ticksMinor.strokeColor = a.withAlphaComponent(0.18).cgColor
+        for (i, o) in orbits.enumerated() { o.strokeColor = a.withAlphaComponent(i == 0 ? 0.45 : 0.28).cgColor }
+        for e in electrons {
+            e.backgroundColor = NSColor.white.cgColor
+            e.shadowColor = a.cgColor
+        }
+        core.colors = [NSColor.white.cgColor, NSColor.white.withAlphaComponent(0.9).cgColor, a.cgColor, a.withAlphaComponent(0.25).cgColor]
+        core.locations = [0, 0.25, 0.7, 1]
+        coreGlow.backgroundColor = a.withAlphaComponent(0.6).cgColor
+        coreGlow.shadowColor = a.cgColor
+        cloud.setValue(a.cgColor, forKeyPath: "emitterCells.dot.color")
         for (i, t) in ringTracks.enumerated() {
             t.strokeColor = a.withAlphaComponent(0.12).cgColor
             ringValues[i].strokeColor = (i == 2 ? NSColor.white.withAlphaComponent(0.85) : a.withAlphaComponent(i == 0 ? 0.95 : 0.7)).cgColor
         }
         CATransaction.commit()
+        colorsReady = true
     }
 
     /// Changes a layer's animation speed without making it jump.
@@ -198,21 +282,23 @@ final class OrbLayerView: NSView {
     func update(phase: Phase, accent: NSColor, still: Bool, level: CGFloat) {
         if accent != self.accent {
             self.accent = accent
-            applyColors()
+            applyColors(animated: colorsReady)
         }
         if phase != self.phase || still != self.still {
             self.phase = phase
             self.still = still
-            let spinSpeed: Float, pulseSpeed: Float
+            let speed: Float, pulse: Float, particles: Float
             switch phase {
-            case .idle: (spinSpeed, pulseSpeed) = (0.6, 1)
-            case .listening: (spinSpeed, pulseSpeed) = (1.6, 2)
-            case .thinking: (spinSpeed, pulseSpeed) = (2.2, 1.6)
-            case .acting: (spinSpeed, pulseSpeed) = (2.6, 1.8)
-            case .speaking: (spinSpeed, pulseSpeed) = (1.2, 4.5)
+            case .idle: (speed, pulse, particles) = (0.55, 1, 10)
+            case .listening: (speed, pulse, particles) = (1.4, 2, 28)
+            case .thinking: (speed, pulse, particles) = (2.2, 1.6, 42)
+            case .acting: (speed, pulse, particles) = (2.8, 1.8, 55)
+            case .speaking: (speed, pulse, particles) = (1.2, 4, 30)
             }
-            setSpeed(spinLayer, still ? 0 : spinSpeed)
-            setSpeed(pulseLayer, still ? 0 : pulseSpeed)
+            setSpeed(atomLayer, still ? 0 : speed)
+            setSpeed(pulseLayer, still ? 0 : pulse)
+            setSpeed(tickRing, still ? 0 : 1)
+            cloud.birthRate = still ? 0 : particles
         }
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.12)

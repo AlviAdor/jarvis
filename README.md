@@ -20,14 +20,19 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 - Open-source tool servers through the Model Context Protocol (MCP)
 
 **Look after your Mac**
-- Live CPU, memory, storage, battery health, temperature state and network around the orb
+- Live CPU, memory, storage, battery health, temperature state and network around the orb (optional, off by default)
 - "How's my Mac?" is answered from a live reading, on device when possible
 - Warnings for low battery, low storage, memory pressure and overheating
 - Disk cleanup: finds large files, old downloads, duplicates, caches and developer data, shows what's safe, and asks before removing anything. Your files go to the Trash so they can be restored
 - Folder tidying (Downloads, Desktop...) by kind, with one-step undo
 
+**Remembers you**
+- Keeps the conversation across restarts, so follow-ups like "and tomorrow?" just work
+- Learns about you from setup ("About you") and from what you mention, all stored on this Mac
+- Adaptive colour: cyan for light work, shifting to red as work gets heavy
+
 **Models**
-- Quick questions go to an on-device model (Apple Intelligence or Ollama): free, private, about a second
+- Quick questions go to an on-device model, Ollama (preferred when running) or Apple Intelligence: free, private, about a second. Ollama needs no API key: install it and download a model from Settings, Models
 - Everything else goes to Gemini (lite / flash / pro, chosen per request), with fallback to lighter models on rate limits
 - Claude is optional: used first when a key is set, and Gemini takes over automatically if it fails
 

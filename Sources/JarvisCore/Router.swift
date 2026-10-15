@@ -40,6 +40,24 @@ public struct Router: Sendable {
         return toolWords.contains { s.contains($0) }
     }
 
+    private static let followOpeners = [
+        "and ", "what about", "how about", "also ", "then ", "but ", "so ", "ok ", "okay", "yes", "yeah", "no,", "nope",
+        "do it", "go ahead", "do that", "same for", "the same", "again", "more", "tell me more", "why", "what else",
+        "and then", "instead", "actually", "that one", "this one", "the first", "the second", "the last", "send it", "open it",
+    ]
+    private static let backReferences = [" it", " it?", " that", " this", " them", " those", " these", " there", " he ", " she ", " they",
+                                         " him", " her", " his ", " its ", " one ", " ones", " same", " instead", " again", " too"]
+
+    /// Short messages that only make sense next to the previous one: "and tomorrow?", "send it to her".
+    public static func isFollowUp(_ text: String) -> Bool {
+        let s = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = s.split(separator: " ").count
+        guard words <= 9 else { return false }
+        if followOpeners.contains(where: { s.hasPrefix($0) }) { return true }
+        let padded = " " + s + " "
+        return words <= 6 && backReferences.contains { padded.contains($0) }
+    }
+
     /// Questions about the Mac itself. The local model can answer these from a live reading.
     public static func isMacStatus(_ text: String) -> Bool {
         let s = " " + text.lowercased() + " "
@@ -61,7 +79,7 @@ public struct Router: Sendable {
     }
 
     public static let classifierPrompt = """
-    Classify the user's request. Reply with exactly one word:
+    Classify the user's latest request, reading it as a continuation of the previous exchange if one is given. Reply with exactly one word:
     chat - conversation, a simple question, or a task for tools: mail, calendar, reminders, notes, messages, files, music, volume, settings, disk cleanup, the Mac's health
     web - needs current information from the internet
     screen - needs operating the computer (apps, clicking, typing, browsing)

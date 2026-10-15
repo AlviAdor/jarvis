@@ -56,7 +56,8 @@ private struct GeneralTab: View {
                     ForEach(HotKey.labels, id: \.id) { Text($0.label).tag($0.id) }
                 }
                 Toggle("The shortcut opens the floating ask bar", isOn: bind(model, \.quickPanel))
-                Toggle("Keep earlier answers from this session", isOn: bind(model, \.keepHistory))
+                Toggle("Show earlier answers in the window", isOn: bind(model, \.keepHistory))
+                Toggle("Show live Mac readings (CPU, memory, storage, battery)", isOn: bind(model, \.showTelemetry))
             }
             Section("While Jarvis works") {
                 Toggle("Show the floating status bubble", isOn: bind(model, \.overlayEnabled))
@@ -128,7 +129,7 @@ private struct ModelsTab: View {
         Form {
             Section {
                 Picker("Engine", selection: bind(model, \.localEngine)) {
-                    Text("Auto (Apple, then Ollama)").tag("auto")
+                    Text("Auto (Ollama when running, else Apple)").tag("auto")
                     Text("Apple on-device model").tag("apple")
                     Text("Ollama").tag("ollama")
                     Text("Off").tag("off")
@@ -147,6 +148,9 @@ private struct ModelsTab: View {
                 TestResults(lines: model.localTest)
                 Hint("Quick questions are answered on this Mac for free and in about a second. Anything that needs the web, your screen, tools or deep thinking goes to the cloud automatically.")
             } header: { Text("On this Mac") }
+            Section("Ollama") {
+                OllamaSetup()
+            }
 
             Section {
                 Picker("Mode", selection: bind(model, \.modelChoice)) {
@@ -219,7 +223,7 @@ private struct VoiceTab: View {
     }
 }
 
-private struct VoiceMatchControls: View {
+struct VoiceMatchControls: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var voice: VoiceEngine
     private let lines = [
@@ -438,9 +442,18 @@ private struct MemoryTab: View {
 
     var body: some View {
         Form {
+            Section("About you") {
+                AboutYouForm()
+            }
+            Section("Memory") {
+                Toggle("Remember our conversation, even after Jarvis restarts", isOn: bind(model, \.rememberConversations))
+                Toggle("Learn about me from what I say", isOn: bind(model, \.learnAboutMe))
+                Button("Start a new conversation") { model.clearHistory() }
+                Hint("Follow-ups like \u{201C}and tomorrow?\u{201D} continue the last topic. Learning uses a tiny Gemini request only when you talk about yourself, and never stores passwords or card numbers.")
+            }
             Section {
                 if model.facts.isEmpty {
-                    Text("Nothing yet. Say \u{201C}Jarvis, remember that…\u{201D}").foregroundStyle(.secondary)
+                    Text("Nothing yet. Say \u{201C}Jarvis, remember that…\u{201D} or just tell it about yourself.").foregroundStyle(.secondary)
                 }
                 ForEach(model.facts, id: \.self) { f in
                     HStack {
@@ -450,8 +463,10 @@ private struct MemoryTab: View {
                             .buttonStyle(.borderless)
                     }
                 }
+            } header: {
+                Text("What Jarvis knows")
             } footer: {
-                Hint("Remembered facts are stored on this Mac and included with your requests so Jarvis can personalise its answers.")
+                Hint("Stored on this Mac only and sent with your requests so Jarvis can personalise its answers.")
             }
         }
         .formStyle(.grouped)
@@ -471,27 +486,13 @@ private struct LookTab: View {
                 Text("Match system").tag("system")
             }
             .pickerStyle(.segmented)
-            HStack {
-                Text("Accent")
-                Spacer()
-                ForEach(AccentPresets.all, id: \.self) { hex in
-                    Button { model.store.value.accentHex = hex } label: {
-                        Circle()
-                            .fill(Color(hex: hex))
-                            .frame(width: 22, height: 22)
-                            .overlay(Circle().stroke(.primary, lineWidth: model.store.value.accentHex == hex ? 2 : 0))
-                    }
-                    .buttonStyle(.plain)
-                }
-                ColorPicker("", selection: Binding(get: { Color(hex: model.store.value.accentHex) },
-                                                   set: { model.store.value.accentHex = $0.hex }), supportsOpacity: false)
-                    .labelsHidden()
-            }
+            ColourControls()
+            Toggle("Show live Mac readings around the orb", isOn: bind(model, \.showTelemetry))
             Toggle("Reduce motion", isOn: bind(model, \.reduceMotion))
             HStack {
                 Spacer()
                 OrbView(phase: .listening, accent: model.accent, still: model.store.value.reduceMotion)
-                    .frame(width: 120, height: 120)
+                    .frame(width: 150, height: 150)
                 Spacer()
             }
         }

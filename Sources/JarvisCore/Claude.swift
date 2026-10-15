@@ -38,17 +38,17 @@ public final class ClaudeAgent: @unchecked Sendable {
     private let settings: JarvisSettings
     private let tools: ToolBox
     private let tracker: UsageTracker
-    private let facts: [String]
+    private let profile: String
     private let log: @Sendable (String) -> Void
 
     public init(client: ClaudeClient, model: String, settings: JarvisSettings, tools: ToolBox,
-                tracker: UsageTracker, facts: [String], log: @escaping @Sendable (String) -> Void) {
+                tracker: UsageTracker, profile: String, log: @escaping @Sendable (String) -> Void) {
         self.client = client
         self.model = model
         self.settings = settings
         self.tools = tools
         self.tracker = tracker
-        self.facts = facts
+        self.profile = profile
         self.log = log
     }
 
@@ -66,7 +66,7 @@ public final class ClaudeAgent: @unchecked Sendable {
         }
         messages.append(["role": "user", "content": first])
 
-        let system = jarvisSystemPrompt(mode: mode, settings: settings, facts: facts)
+        let system = jarvisSystemPrompt(mode: mode, settings: settings, profile: profile)
         let toolDefs = tools.anthropicTools(screen: screenMode)
         // Older screenshots can't be pruned without editing history, so keep Claude's screen runs short.
         let limit = screenMode ? min(settings.maxSteps, 15) : 12

@@ -77,9 +77,17 @@ final class AppModel: ObservableObject {
     @Published var testing = false
     @Published var voices: [VoiceOption] = []
     @Published var permissions: [PermissionItem] = []
+    @Published var about = ""
+    /// 0 for light work, 1 for heavy work; drives the adaptive colour.
+    @Published var workload: Double = 0
+    // Ollama setup
+    @Published var ollamaBusy: String?
+    @Published var pullProgress: Double?
 
     var openMainWindow: (() -> Void)?
-    private var chat: [(role: String, text: String)] = []
+    private var lastLearn = Date.distantPast
+    private var strainTimer: Timer?
+    private var systemStrained = false
     private var job: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
@@ -98,7 +106,12 @@ final class AppModel: ObservableObject {
     var busy: Bool { phase == .thinking || phase == .acting }
     private var bundled: Bool { Bundle.main.bundleURL.pathExtension == "app" }
     private var wantsTelemetry: Bool { store.value.showTelemetry && (windowVisible || quickActive) && !needsOnboarding }
-    var accent: Color { Color(hex: store.value.accentHex) }
+    /// The light colour while work is easy, shifting towards the heavy colour as it gets harder.
+    var accent: Color {
+        let s = store.value
+        guard s.colorMode == "adaptive" else { return Color(hex: s.accentHex) }
+        return Color.blend(Color(hex: s.accentHex), Color(hex: s.heavyAccentHex), max(workload, systemStrained ? 0.85 : 0))
+    }
     var colorScheme: ColorScheme? {
         switch store.value.theme {
         case "light": return .light
@@ -109,7 +122,8 @@ final class AppModel: ObservableObject {
 
     private init() {
         termsAccepted = UserDefaults.standard.string(forKey: "jarvis.terms.version") == Terms.version
-        onboarded = UserDefaults.standard.bool(forKey: "jarvis.onboarded")
+        // Version 2 of the guide added "About you" and voice training; earlier users see it once more.
+        onboarded = UserDefaults.standard.integer(forKey: "jarvis.onboarding.version") >= 2
 
         store.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         usage.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
@@ -136,6 +150,7 @@ final class AppModel: ObservableObject {
         voice.onRejected = { [weak self] in self?.flash("That didn't sound like you, so I ignored it.") }
         voice.onEnrolled = { [weak self] ok in
             guard let self else { return }
+            if ok { self.store.value.voiceLockEnabled = true }
             let msg = ok ? "Got it. I'll recognise your voice now." : "I couldn't learn your voice. Please try again somewhere quiet."
             self.flash(msg)
             self.speaker.say(msg, settings: self.store.value)
@@ -154,11 +169,13 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 self.facts = self.memory.facts
                 self.automations = self.memory.automations
+                self.about = self.memory.about
                 self.scheduler.reschedule()
             }
         }
         facts = memory.facts
         automations = memory.automations
+        about = memory.about
         HotKey.action = { [weak self] in self?.hotkeyPressed() }
     }
 
@@ -178,6 +195,24 @@ final class AppModel: ObservableObject {
         if !needsOnboarding { startListening() }
         telemetry.setActive(wantsTelemetry)
         startHealthWatch()
+        if store.value.rememberConversations { restoreHistory() } else { memory.clearConversation() }
+        watchStrain()
+    }
+
+    /// Shows the earlier answers again after a restart.
+    private func restoreHistory() {
+        let turns = memory.turns
+        var out: [Exchange] = []
+        var i = 0
+        while i + 1 < turns.count {
+            if turns[i].role == "user", turns[i + 1].role == "assistant" {
+                out.append(Exchange(question: turns[i].text, answer: turns[i + 1].text, source: turns[i + 1].source ?? "", at: turns[i + 1].at))
+                i += 2
+            } else {
+                i += 1
+            }
+        }
+        history = Array(out.suffix(30))
     }
 
     func startListening() {
@@ -199,6 +234,7 @@ final class AppModel: ObservableObject {
         voice.lockEnabled = s.voiceLockEnabled
         voice.lockStrictness = s.voiceLockStrictness
         hotKey.set(s.hotkey)
+        if s.aboutText != memory.about { memory.setAbout(s.aboutText) }
         guard started else { return }
         telemetry.setActive(wantsTelemetry)
         if dockShown != s.showInDock {
@@ -228,6 +264,7 @@ final class AppModel: ObservableObject {
 
     func finishOnboarding() {
         UserDefaults.standard.set(true, forKey: "jarvis.onboarded")
+        UserDefaults.standard.set(2, forKey: "jarvis.onboarding.version")
         onboarded = true
         if bundled { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
         startListening()
@@ -293,11 +330,12 @@ final class AppModel: ObservableObject {
         highlight = nil
         steps = steps.map { var s = $0; if s.state == .running { s.state = .failed }; return s }
         phase = .idle
+        setWorkload(0)
     }
 
     func submit(_ text: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
+        guard !t.isEmpty, !needsOnboarding else { return }
         typed = ""
         job?.cancel()
         job = Task { await handle(t) }
@@ -331,7 +369,7 @@ final class AppModel: ObservableObject {
 
     func clearHistory() {
         history.removeAll()
-        chat.removeAll()
+        memory.clearConversation()
         question = ""
         answer = ""
         steps = []
@@ -353,23 +391,33 @@ final class AppModel: ObservableObject {
 
         let s = store.value
         var mode = router.heuristic(text)
+        setWorkload(0.12)
+
+        // A follow-up goes wherever the previous request went, with the conversation attached.
+        let previous = memory.context().last { $0.role == "assistant" }
+        var followUp = false
+        if let prev = previous, Date().timeIntervalSince(prev.at) < 20 * 60, Router.isFollowUp(text),
+           let m = prev.mode, m != "local", let pm = Mode(rawValue: m) {
+            mode = pm
+            followUp = true
+        }
 
         // Questions about the Mac itself: answered from a live reading, on this Mac when possible.
-        if Router.isMacStatus(text) {
+        if !followUp, Router.isMacStatus(text) {
             let snap = SystemMonitor.shared.snapshot()
             let top = await SystemMonitor.shared.topProcesses()
             let report = SystemMonitor.report(snap, top: top)
             apply(ActionEvent(title: "Checked your Mac", detail: nil, state: .done, icon: "gauge.with.dots.needle.67percent"))
-            switch await answerLocally(text, began: began, context: report) {
+            switch await answerLocally(text, began: began, context: "Live data about this Mac right now:\n" + report) {
             case .answered: return
             case .escalate, .unavailable:
                 if store.geminiKey.isEmpty && store.claudeKey.isEmpty {
-                    record(text, SystemMonitor.spokenSummary(snap), source: "On this Mac · \(Self.elapsed(began))")
+                    record(text, SystemMonitor.spokenSummary(snap), source: "On this Mac · \(Self.elapsed(began))", mode: "local")
                     return
                 }
                 mode = .chat
             }
-        } else if mode == nil || mode == .chat, !Router.needsTools(text) {
+        } else if !followUp, mode == nil || mode == .chat, !Router.needsTools(text) {
             // Small talk and quick questions are answered on this Mac: free, private and fast.
             switch await answerLocally(text, began: began) {
             case .answered: return
@@ -390,13 +438,18 @@ final class AppModel: ObservableObject {
 
         do {
             if mode == nil, !store.geminiKey.isEmpty {
+                var ask = text
+                if let prev = previous, let q = memory.context().last(where: { $0.role == "user" }) {
+                    ask = "Previous request: \(q.text)\nPrevious answer: \(prev.text.prefix(300))\n\nLatest request: \(text)"
+                }
                 let r = try await client.generate(model: s.liteModel, system: Router.classifierPrompt,
-                                                  contents: [["role": "user", "parts": [["text": text]]]],
+                                                  contents: [["role": "user", "parts": [["text": ask]]]],
                                                   maxTokens: 8, thinking: GeminiAgentThinking.minimal(s.liteModel))
                 usage.add(r.usage)
                 mode = Router.parse(r.text)
             }
             var m = mode ?? .chat
+            setWorkload(Self.weight(of: m))
             let logger: @Sendable (String) -> Void = { [weak self] line in Task { @MainActor in self?.log(line) } }
 
             var mcpTools: [MCPTool] = []
@@ -423,6 +476,7 @@ final class AppModel: ObservableObject {
                     handedToScreen = true
                     apply(ActionEvent(title: "Switching to screen control", detail: outcome.summary, state: .done, icon: "display"))
                     m = .screen
+                    setWorkload(1)
                     stepAside()
                     continue
                 }
@@ -431,11 +485,12 @@ final class AppModel: ObservableObject {
                    let up = router.escalation(from: m, settings: s) {
                     log("Retrying with the \(up.rawValue) model")
                     override = up
+                    setWorkload(1)
                     continue
                 }
                 break
             }
-            record(text, outcome.summary, source: "\(provider) · \(Self.elapsed(began))")
+            record(text, outcome.summary, source: "\(provider) · \(Self.elapsed(began))", mode: m.rawValue)
         } catch is CancellationError {
             phase = .idle
         } catch {
@@ -513,7 +568,9 @@ final class AppModel: ObservableObject {
     /// Streams the local model's answer and starts speaking at the first full sentence.
     private func answerLocally(_ text: String, began: Date, context: String? = nil) async -> LocalResult {
         let s = store.value
-        guard let (stream, engine) = await LocalBrain.shared.stream(text, history: Array(chat.suffix(6)), settings: s, context: context) else {
+        let profile = memory.profile(name: s.userName)
+        let ctx = [profile.isEmpty ? nil : "What you know about the user:\n" + profile, context].compactMap { $0 }.joined(separator: "\n\n")
+        guard let (stream, engine) = await LocalBrain.shared.stream(text, history: chatHistory(), settings: s, context: ctx.isEmpty ? nil : ctx) else {
             return .unavailable
         }
         let streamSpeech = s.speakReplies && s.voiceEngine != "gemini"
@@ -557,8 +614,9 @@ final class AppModel: ObservableObject {
                 speaker.say(Self.spoken(final), settings: s)
             }
         }
-        remember(text, final, source: answerSource)
+        remember(text, final, source: answerSource, mode: "local")
         if !speaker.isSpeaking { phase = .idle }
+        setWorkload(0)
         refreshOverlay()
         return .answered
     }
@@ -585,9 +643,9 @@ final class AppModel: ObservableObject {
         if s.claudeEnabled, !store.claudeKey.isEmpty, mode != .web, Date() >= claudeBlockedUntil {
             let model = s.claudeModelID(tier)
             let agent = ClaudeAgent(client: ClaudeClient(apiKey: store.claudeKey), model: model, settings: s,
-                                    tools: tools, tracker: usage, facts: memory.facts, log: logger)
+                                    tools: tools, tracker: usage, profile: memory.profile(name: s.userName), log: logger)
             do {
-                return (try await agent.run(task: text, mode: mode, history: Array(chat.suffix(8))), "Claude")
+                return (try await agent.run(task: text, mode: mode, history: chatHistory()), "Claude")
             } catch is CancellationError {
                 throw CancellationError()
             } catch let e as LLMError {
@@ -604,8 +662,8 @@ final class AppModel: ObservableObject {
             throw LLMError.other("Claude didn't work and there's no Gemini key. Add one in Settings.")
         }
         let agent = GeminiAgent(client: client, chain: chain, settings: s, tools: tools, tracker: usage,
-                                facts: memory.facts, log: logger)
-        return (try await agent.run(task: text, mode: mode, history: Array(chat.suffix(8))), "Gemini")
+                                profile: memory.profile(name: s.userName), log: logger)
+        return (try await agent.run(task: text, mode: mode, history: chatHistory()), "Gemini")
     }
 
     // MARK: Tests
@@ -773,21 +831,123 @@ final class AppModel: ObservableObject {
     }
 
     /// Shows, speaks and keeps a finished answer.
-    private func record(_ q: String, _ a: String, source: String) {
+    private func record(_ q: String, _ a: String, source: String, mode: String) {
         reply(a, source: source)
-        remember(q, Self.clean(a), source: source)
+        remember(q, Self.clean(a), source: source, mode: mode)
     }
 
-    private func remember(_ q: String, _ a: String, source: String) {
-        chat.append(("user", q))
-        chat.append(("assistant", a))
-        if chat.count > 40 { chat.removeFirst(chat.count - 40) }
-        guard store.value.keepHistory else { return }
-        history.append(Exchange(question: q, answer: a, source: source, at: Date()))
-        if history.count > 50 { history.removeFirst(history.count - 50) }
+    /// The conversation so far, for the models.
+    private func chatHistory() -> [(role: String, text: String)] {
+        memory.context().map { ($0.role, $0.text) }
+    }
+
+    private func remember(_ q: String, _ a: String, source: String, mode: String) {
+        memory.append(Turn(role: "user", text: q, mode: mode))
+        memory.append(Turn(role: "assistant", text: a, mode: mode, source: source))
+        if store.value.keepHistory {
+            history.append(Exchange(question: q, answer: a, source: source, at: Date()))
+            if history.count > 50 { history.removeFirst(history.count - 50) }
+        }
+        learn(from: q)
+        setWorkload(0, after: 1.5)
+    }
+
+    /// Quietly notes lasting facts the user mentions about themselves.
+    private func learn(from text: String) {
+        let s = store.value
+        guard s.learnAboutMe, !store.geminiKey.isEmpty, Learner.worthChecking(text),
+              Date().timeIntervalSince(lastLearn) > 20, !usage.overCap(s.dailyRequestCap) else { return }
+        lastLearn = Date()
+        let key = store.geminiKey, known = memory.facts, model = s.liteModel
+        Task {
+            let found = await Learner.learn(from: text, known: known, key: key, model: model)
+            guard !found.isEmpty else { return }
+            found.forEach { memory.addFact($0) }
+            log("Learned: " + found.joined(separator: " "))
+            flash("Noted: " + found.joined(separator: " "))
+        }
+    }
+
+    // MARK: Adaptive colour
+
+    static func weight(of m: Mode) -> Double {
+        switch m {
+        case .chat: return 0.3
+        case .web: return 0.45
+        case .hard: return 0.85
+        case .screen: return 1
+        }
+    }
+
+    private var workloadTask: Task<Void, Never>?
+
+    func setWorkload(_ w: Double, after delay: TimeInterval = 0) {
+        workloadTask?.cancel()
+        workloadTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            guard !Task.isCancelled, let self, abs(self.workload - w) > 0.01 else { return }
+            withAnimation(.easeInOut(duration: 0.9)) { self.workload = w }
+        }
+    }
+
+    /// Every ten seconds while Jarvis is on screen: is the Mac itself working hard?
+    private func watchStrain() {
+        strainTimer?.invalidate()
+        strainTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.store.value.colorMode == "adaptive", self.windowVisible || self.quickActive else { return }
+                let snap = self.telemetry.snapshot ?? SystemMonitor.shared.snapshot()
+                let strained = snap.cpu > 0.85 || snap.thermal == "serious" || snap.thermal == "critical" || snap.pressure == "critical"
+                if strained != self.systemStrained { withAnimation(.easeInOut(duration: 1.2)) { self.systemStrained = strained } }
+            }
+        }
+        strainTimer?.tolerance = 2
+    }
+
+    // MARK: Ollama
+
+    func setUpOllama() async {
+        ollamaBusy = "Starting Ollama…"
+        if !LocalBrain.ollamaInstalled {
+            guard FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew") || FileManager.default.fileExists(atPath: "/usr/local/bin/brew") else {
+                ollamaBusy = nil
+                NSWorkspace.shared.open(URL(string: "https://ollama.com/download/mac")!)
+                return
+            }
+            ollamaBusy = "Installing Ollama with Homebrew… this takes a minute or two"
+            let brew = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew") ? "/opt/homebrew/bin/brew" : "/usr/local/bin/brew"
+            _ = await Run.capture(brew, ["install", "ollama"], timeout: 900)
+        }
+        let up = await LocalBrain.shared.startOllama()
+        ollamaModels = await LocalBrain.shared.ollamaModels(fresh: true)
+        ollamaBusy = up ? nil : "Ollama is installed but didn't start. Open it from Applications, or run \"ollama serve\"."
+    }
+
+    func downloadModel(_ name: String) async {
+        if !(await LocalBrain.shared.ollamaReachable()) { await setUpOllama() }
+        guard await LocalBrain.shared.ollamaReachable() else { return }
+        pullProgress = 0
+        ollamaBusy = "Downloading \(name)…"
+        do {
+            try await LocalBrain.shared.pull(name) { [weak self] p, status in
+                Task { @MainActor in
+                    self?.pullProgress = p
+                    if !status.isEmpty { self?.ollamaBusy = "Downloading \(name): \(status)" }
+                }
+            }
+            ollamaModels = await LocalBrain.shared.ollamaModels(fresh: true)
+            store.value.ollamaModel = name
+            if store.value.localEngine == "apple" { store.value.localEngine = "auto" }
+            ollamaBusy = nil
+            flash("\(name) is ready")
+        } catch {
+            ollamaBusy = "Download failed: \(Friendly.message(error))"
+        }
+        pullProgress = nil
     }
 
     private func reply(_ text: String, source: String = "") {
+        setWorkload(0, after: 1.5)
         let c = Self.clean(text)
         answer = c
         answerSource = source
