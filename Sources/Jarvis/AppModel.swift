@@ -109,6 +109,22 @@ final class AppModel: ObservableObject {
     private var voicesOffered = Set<String>()
     private var lastWarm = Date.distantPast
     private var lastTypingWarm = Date.distantPast
+    /// The last spoken request as understood, and the one being corrected in the box, so the fix can be learned.
+    private var lastHeard = ""
+    private var correctingHeard: String?
+    private var speechModelRecipe = ""
+
+    /// App names recognition should know, read once.
+    private static let appNames: [String] = {
+        let fm = FileManager.default
+        let names = ["/Applications", NSHomeDirectory() + "/Applications"]
+            .flatMap { (try? fm.contentsOfDirectory(atPath: $0)) ?? [] }
+            .filter { $0.hasSuffix(".app") && !$0.hasPrefix(".") }
+            .map { String($0.dropLast(4)) }
+            .filter { $0.count <= 24 }
+        return Array(Hearing.unique(names.sorted()).prefix(40))
+    }()
+
     private var systemStrained = false
     private var job: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
@@ -320,6 +336,8 @@ final class AppModel: ObservableObject {
         voice.patient = s.patientListening
         voice.usualGap = s.patientListening ? s.learnedGap : 0
         voice.vocabulary = [s.userName, s.userName.split(separator: " ").first.map(String.init) ?? ""].filter { !$0.isEmpty }
+        voice.hints = Hearing.contextualStrings(wakeWord: s.wakeWord, settings: s, apps: Self.appNames)
+        refreshSpeechModel(s)
         voice.bargeInEnabled = s.bargeIn
         voice.lockEnabled = s.voiceLockEnabled
         voice.lockStrictness = s.voiceLockStrictness
@@ -450,6 +468,10 @@ final class AppModel: ObservableObject {
         notifyAnswer = notifyWhenDone
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needsOnboarding, !t.isEmpty || !attachments.isEmpty else { return }
+        if let h = correctingHeard {
+            correctingHeard = nil
+            learnCorrection(heard: h, meant: t)
+        }
         if t.isEmpty { t = attachments.count == 1 ? "What is this? Summarise it." : "What are these? Summarise them." }
         let files = attachments
         attachments = []
@@ -472,7 +494,43 @@ final class AppModel: ObservableObject {
         warmCloud()
     }
 
-    private func heard(_ text: String) {
+    /// Builds the language model of typical requests with this user's words, again only when those words change.
+    private func refreshSpeechModel(_ s: JarvisSettings) {
+        guard let locale = voice.recognitionLocale else { return }
+        let first = s.userName.split(separator: " ").first.map(String.init) ?? ""
+        let names = Hearing.unique([s.userName, first].filter { !$0.isEmpty })
+        let places = Hearing.places(s)
+        let words = Hearing.unique(Hearing.profileWords(s) + s.heardWords)
+        let recipe = ([locale.identifier] + names + places + words).joined(separator: "|")
+        guard recipe != speechModelRecipe else { return }
+        speechModelRecipe = recipe
+        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Jarvis/Speech", isDirectory: true)
+        let apps = Self.appNames
+        Task { [weak self] in
+            let model = await Hearing.languageModel(locale: locale, names: names, places: places, apps: apps, words: words, in: folder)
+            await MainActor.run { self?.voice.languageModel = model }
+        }
+    }
+
+    /// The user edited a spoken request before sending it: learn the words that were misheard.
+    private func learnCorrection(heard: String, meant: String) {
+        let fixes = Hearing.corrections(heard: heard, meant: meant)
+        guard !fixes.isEmpty else { return }
+        var s = store.value
+        for (k, v) in fixes where s.heardAs.count < 300 || s.heardAs[k] != nil { s.heardAs[k] = v }
+        s.heardWords = Array(Hearing.unique(s.heardWords + Hearing.newWords(heard: heard, meant: meant)).suffix(60))
+        store.value = s
+        log("Learned: " + fixes.map { "\u{201C}\($0.key)\u{201D} → \u{201C}\($0.value)\u{201D}" }.joined(separator: ", "))
+        flash("Got it. I'll hear that right next time.")
+    }
+
+    private func heard(_ raw: String) {
+        // Words it reliably mishears, and ones the user has corrected before, are fixed first.
+        let text = Hearing.correct(raw, learned: store.value.heardAs)
+        if text != raw { log("Heard \u{201C}\(raw)\u{201D}, understood \u{201C}\(text)\u{201D}") }
+        lastHeard = text
+        correctingHeard = nil
         // A soft sound says the request was caught, before any answer arrives.
         if store.value.soundCues { NSSound(named: "Pop")?.play() }
         let conf = voice.lastConfidence
@@ -501,6 +559,7 @@ final class AppModel: ObservableObject {
         guard !question.isEmpty else { return }
         typed = question
         attachments = lastAttachments
+        correctingHeard = question == lastHeard ? lastHeard : nil
     }
 
     // MARK: Attachments

@@ -656,3 +656,56 @@ final class AIAppTests: XCTestCase {
         XCTAssertEqual(AIApps.target("grock")?.id, "grok")
     }
 }
+
+final class HearingTests: XCTestCase {
+    func testMishearingsAreFixedInContext() {
+        let fixed = [
+            "Create a gift commit and push it to Jeb": "Create a git commit and push it to GitHub",
+            "Create a good commit and push it to the top": "Create a git commit and push it to GitHub",
+            "Create a get commit and push it to get hard": "Create a git commit and push it to GitHub",
+            "push my changes to get hub": "push my changes to GitHub",
+            "ask chatting to write a cover letter": "ask ChatGPT to write a cover letter",
+            "tell chat GPT to plan my week": "tell ChatGPT to plan my week",
+            "How much feet is space? Does my Mac have?": "How much free disk space? Does my Mac have?",
+        ]
+        for (heard, meant) in fixed { XCTAssertEqual(Hearing.correct(heard), meant, heard) }
+        // Everyday English is left alone.
+        for t in ["I want to get a gift for my mum", "get status of my order", "push it to the top of the list",
+                  "Peter Parker is my favourite hero", "what's the weather in Dhaka tomorrow"] {
+            XCTAssertEqual(Hearing.correct(t), t)
+        }
+    }
+
+    func testCorrectionsAreLearnedWithTheirContext() {
+        let fixes = Hearing.corrections(heard: "Hey Jarvis, what's the weather in Parker tomorrow?", meant: "what's the weather in Dhaka tomorrow")
+        XCTAssertEqual(fixes, ["in parker tomorrow": "in Dhaka tomorrow"])
+        XCTAssertEqual(Hearing.correct("weather in Parker tomorrow?", learned: fixes), "weather in Dhaka tomorrow?")
+        XCTAssertEqual(Hearing.correct("Peter Parker tomorrow", learned: fixes), "Peter Parker tomorrow")
+        let git = Hearing.corrections(heard: "Create a gift commit and push it to get up", meant: "Create a git commit and push it to GitHub")
+        XCTAssertEqual(git["a gift commit"], "a git commit")
+        XCTAssertEqual(git["to get up"], "to GitHub")
+        XCTAssertEqual(Hearing.newWords(heard: "push it to get up", meant: "push it to GitHub"), ["GitHub"])
+    }
+
+    func testChangesOfMindAreNotLearned() {
+        XCTAssertTrue(Hearing.corrections(heard: "what's the weather in London", meant: "what's the weather in Paris").isEmpty)
+        XCTAssertTrue(Hearing.corrections(heard: "set a timer for ten minutes", meant: "what's on my calendar today").isEmpty)
+        XCTAssertTrue(Hearing.soundsAlike("Parker", "Dhaka"))
+        XCTAssertTrue(Hearing.soundsAlike("get up", "GitHub"))
+        XCTAssertFalse(Hearing.soundsAlike("London", "Paris"))
+    }
+
+    func testProfileWordsAndHintsStayFocused() {
+        var s = JarvisSettings()
+        s.userName = "Alvi Ador"
+        s.aboutWork = "Student at AIUB studying CSE"
+        s.aboutPlace = "Dhaka, Bangladesh"
+        XCTAssertEqual(Hearing.places(s), ["Dhaka", "Bangladesh"])
+        XCTAssertTrue(Hearing.profileWords(s).contains("AIUB"))
+        XCTAssertFalse(Hearing.profileWords(s).contains("Student"))
+        let hints = Hearing.contextualStrings(wakeWord: "jarvis", settings: s, apps: (1...200).map { "App \($0)" })
+        XCTAssertLessThanOrEqual(hints.count, 100)
+        XCTAssertTrue(hints.contains("Alvi") && hints.contains("Dhaka") && hints.contains("ChatGPT"))
+        XCTAssertEqual(hints.filter { $0 == "Jarvis" }.count, 1)
+    }
+}

@@ -214,6 +214,11 @@ public final class VoiceEngine: ObservableObject {
     @Published public private(set) var lastMatch: (score: Float, needed: Float)?
     /// Words recognition should expect, such as the wake word and the user's name.
     public var vocabulary: [String] = []
+    /// Phrases recognition leans towards: names, places, apps and words the user taught it.
+    public var hints: [String] = []
+    /// A model of typical requests with this user's words, used when recognition runs on this Mac.
+    public var languageModel: SFSpeechLanguageModel.Configuration?
+    public var recognitionLocale: Locale? { recognizer?.locale }
     private var learnedSinceSave = 0
     public var onEnrolled: ((Bool) -> Void)?
     public var lockEnabled = false
@@ -453,9 +458,12 @@ public final class VoiceEngine: ObservableObject {
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         req.addsPunctuation = true
-        // Bias recognition towards the words that matter most: the wake word and the user's name.
-        req.contextualStrings = Array(Set(["Jarvis", "Hey Jarvis", wakeWord.capitalized] + vocabulary)).filter { !$0.isEmpty }
-        if recognizer.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
+        // Bias recognition towards the words that matter most: the wake word, the user's names, places and apps.
+        req.contextualStrings = hints.isEmpty ? Array(Set(["Jarvis", "Hey Jarvis", wakeWord.capitalized] + vocabulary)).filter { !$0.isEmpty } : hints
+        if recognizer.supportsOnDeviceRecognition {
+            req.requiresOnDeviceRecognition = true
+            if let languageModel { req.customizedLanguageModel = languageModel }
+        }
         request = req
         hearing = true
         onSpeechStart?()

@@ -254,6 +254,18 @@ private struct VoiceTab: View {
                 }
                 Toggle("Wait longer when I pause to find a word", isOn: bind(model, \.patientListening))
                 Hint("Jarvis notices when you stop mid-sentence, say \u{201C}um\u{201D}, or repeat a word, and gives you more time to finish. It learns how you usually pause as you talk.")
+                HStack {
+                    let n = model.store.value.heardAs.count
+                    Text(n == 0 ? "No corrections learned yet" : "Learned \(n) correction\(n == 1 ? "" : "s") to what it hears")
+                    Spacer()
+                    if n > 0 {
+                        Button("Forget") {
+                            model.store.value.heardAs = [:]
+                            model.store.value.heardWords = []
+                        }
+                    }
+                }
+                Hint("If Jarvis mishears a word, edit your request (the pencil under the answer) and send it again; it learns the fix. Your name, places and apps from About you are recognised more reliably too.")
                 Hint("Speech is recognized on this Mac when the on-device model is available. Nothing leaves your Mac until you say the wake word and ask something.")
             }
             Section("Recognise my voice (experimental)") {

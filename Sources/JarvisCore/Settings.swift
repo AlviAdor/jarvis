@@ -65,6 +65,8 @@ public struct JarvisSettings: Codable, Equatable {
     public var soundCues = true        // a soft sound when a spoken request is caught
     public var patientListening = true // wait longer for someone who pauses to find a word
     public var learnedGap = 0.0        // how long you usually pause mid-sentence, learned as you talk
+    public var heardAs: [String: String] = [:]  // your corrections to what Jarvis heard, with a word either side
+    public var heardWords: [String] = []        // words from those corrections that recognition leans towards
     public var bargeIn = true          // talking over Jarvis stops it
     public var hotkey = "option+space" // option+space | control+space | command+shift+j | off
     public var voiceEngine = "apple"   // apple (on this Mac) | gemini (studio voices, online)
