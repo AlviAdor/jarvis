@@ -8,6 +8,9 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 - Always-on wake word ("Jarvis"), recognised on this Mac. While idle it only checks the mic level, and it adapts to the room's background noise
 - Answers are spoken (Mac voices, your Personal Voice, or Gemini studio voices) and shown as short, copiable text
 - Optional voice match: learns your voice from five phrases and ignores other people and the TV
+- Patient listening: if you pause to find a word, say "um" or repeat yourself, it waits for you to finish, and learns how you usually pause
+- Hears your words: a language model built on your Mac knows your name, places and apps, common mishearings are fixed in context, and it learns from the requests you correct
+- Talk over it to interrupt; replies start speaking at the first sentence
 
 **Get things done**
 - Calendar, Reminders, Contacts, Notes, Messages and Mail (sending always asks you first)

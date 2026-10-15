@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.13.0
+**Faster**
+- Replies start speaking at the first finished sentence for every kind of answer, and the rest follows without gaps; Gemini voices fetch the next sentence while the current one plays
+- Answers from the local model are spoken as they're written
+- A shorter pause (1.1 s) ends a finished sentence; a trailing one still gets extra time
+- Starting to type warms up the local model and the Gemini connection
+- A soft sound tells you a spoken request was caught (can be turned off)
+- Several lookups (web searches, pages, feeds, files, Mac status) run at the same time when Gemini asks for them together
+- Quicker screen work: faster cursor moves and typing, and shorter waits for the screen to settle
+
+**Patient listening**
+- When you stop mid-sentence to find a word, say "um" or repeat yourself, Jarvis waits longer before answering, so you're not cut off
+- It learns how long you usually pause and starts each request with that much patience; the natural pause after "Hey Jarvis" doesn't count
+- Long requests can run to 40 seconds; turn it off in Settings › Voice
+
+**Hears words more accurately**
+- A small language model of typical Jarvis requests is built on this Mac with your name, places, apps and the words from About you, so recognition expects them
+- Words it reliably mishears are fixed where the context makes the meaning clear ("gift commit" → "git commit", "push it to get up" → "push it to GitHub", "ask chatting" → "ask ChatGPT")
+- Learns from you: edit a spoken request with the pencil and send it again, and Jarvis remembers the fix in that setting; only sound-alike swaps are learned, not changes of mind
+- On 90 test recordings in five English accents, word errors on requests fell from 5.6% to 3.1% with the language model and 0.2% with the fixes (which were written for mishearings seen in that set); everyday sentences stayed at 0.6%
+
 ## 0.12.0
 - Uses other AI assistants for you: say "ask ChatGPT to…", "tell Claude…" or "use Grok to…" (also Gemini, Perplexity and Copilot); Jarvis turns your words into a well-structured prompt on this Mac, opens the desktop app or the website, types the prompt into its message box where you can watch, and sends it
 - Add "and read me the answer" and Jarvis waits for the reply and reads it back
