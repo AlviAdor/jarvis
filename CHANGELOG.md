@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1
+- Far fewer "usage limit" stops: each tier now rotates through every model the key has, and everyday chat and web searches step up to Flash when the Lite models run out
+- Web searches start on Lite models, which have the largest free allowance, leaving Flash for screen work
+- The Gemini studio voice knows when it's out of free requests: it tries the key's other voice models, otherwise speaks with the Mac voice at once, and says so once with a button to switch to the Mac voice for good
+- Settings, Models shows Google's own message for each model that's resting
+- A model the key can't use (access refused) no longer stops the request; the next model is tried
+
 ## 0.8.0
 - Notifications are clickable and have actions: reply to Jarvis right from the notification, copy or read an answer aloud, snooze a timer, and for Mac warnings jump straight to "Free up space", "What's using memory?", "What's draining the battery?" or "What's heating it up?"
 - Notifications show even while Jarvis is in front, and automations post their answer as a notification you can reply to

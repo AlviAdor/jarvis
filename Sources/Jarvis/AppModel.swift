@@ -105,6 +105,7 @@ final class AppModel: ObservableObject {
 
     var openMainWindow: (() -> Void)?
     private var lastLearn = Date.distantPast
+    private var voiceFallbackNoted = Date.distantPast
     private var strainTimer: Timer?
     private var systemStrained = false
     private var job: Task<Void, Never>?
@@ -192,7 +193,18 @@ final class AppModel: ObservableObject {
             if speaking, self.phase == .idle { self.phase = .speaking }
             if !speaking, self.phase == .speaking { self.phase = .idle }
         }
-        speaker.onFallback = { [weak self] why in self?.log("Gemini voice unavailable, used the Mac voice: \(why)") }
+        speaker.knownModels = { [weak self] in self?.store.value.knownModels ?? [] }
+        speaker.onFallback = { [weak self] why in
+            guard let self else { return }
+            self.log("Gemini voice unavailable, used the Mac voice: \(why)")
+            // Say so once a day, not on every reply, and offer the free Mac voice.
+            guard Date().timeIntervalSince(self.voiceFallbackNoted) > 6 * 3600 else { return }
+            self.voiceFallbackNoted = Date()
+            self.flash("The Gemini voice is out of free requests, so I'm using the Mac voice for now.", action: "Always use Mac voice") { [weak self] in
+                self?.store.value.voiceEngine = "apple"
+                self?.flash("Using the Mac voice")
+            }
+        }
         scheduler.onFire = { [weak self] auto in self?.submit(auto.prompt, notifyWhenDone: true) }
         memory.onChange = { [weak self] in
             Task { @MainActor in
@@ -1006,12 +1018,12 @@ final class AppModel: ObservableObject {
               Date().timeIntervalSince(lastLearn) > 20, !usage.overCap(s.dailyRequestCap) else { return }
         lastLearn = Date()
         let key = store.geminiKey, known = memory.facts, model = s.liteModel
-        Task {
+        Task { [weak self] in
             let found = await Learner.learn(from: text, known: known, key: key, model: model)
-            guard !found.isEmpty else { return }
-            found.forEach { memory.addFact($0) }
-            log("Learned: " + found.joined(separator: " "))
-            flash("Noted: " + found.joined(separator: " "), action: "Undo") { [weak self] in
+            guard let self, !found.isEmpty else { return }
+            found.forEach { self.memory.addFact($0) }
+            self.log("Learned: " + found.joined(separator: " "))
+            self.flash("Noted: " + found.joined(separator: " "), action: "Undo") { [weak self] in
                 found.forEach { self?.memory.removeFact($0) }
                 self?.flash("Forgotten")
             }
