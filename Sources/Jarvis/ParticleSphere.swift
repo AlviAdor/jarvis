@@ -57,7 +57,7 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
             float seed = d.w - 2.0;
             float a = d.x + u.ringAngle * (1.0 + 0.08 * sin(seed * 9.0));
             float r = 1.36 + d.y + u.level * 0.06 * sin(u.time * 6.0 + seed * 20.0)
-                      + u.color.w * 0.07 * sin(u.time * 9.0 + seed * 25.0);
+                      + u.color.w * 0.03 * sin(u.time * 2.5 + seed * 25.0);
             float3 p = float3(cos(a) * r, d.z, sin(a) * r);
             float rt = 1.18;
             p = float3(p.x, cos(rt) * p.y - sin(rt) * p.z, sin(rt) * p.y + cos(rt) * p.z);
@@ -76,9 +76,9 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
         float3 p = d.xyz;
         float seed = d.w;
         float k = u.color.w;   // workload, 0 light to 1 heavy
-        // Gentle breathing at rest; under load each particle also jumps off the surface in short, staggered bursts.
-        float jump = k * 0.22 * pow(max(0.0, sin(u.time * (2.5 + 5.5 * k) + seed * 40.0)), 10.0);
-        float drift = 1.0 + u.energy * (0.03 + 0.05 * k) * sin(u.time * (1.3 + 2.5 * k) + seed * 17.0)
+        // Gentle breathing at rest; under load each particle also lifts off the surface in a slow, soft swell.
+        float jump = k * 0.075 * pow(max(0.0, sin(u.time * (1.0 + 1.2 * k) + seed * 40.0)), 4.0);
+        float drift = 1.0 + u.energy * (0.03 + 0.025 * k) * sin(u.time * (1.1 + 0.6 * k) + seed * 17.0)
                           + u.level * 0.24 * sin(u.time * 7.0 + seed * 31.0) * (0.5 + 0.5 * sin(seed * 5.0 + u.time * 2.0))
                           + jump;
         p *= drift;
@@ -92,7 +92,7 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
         VOut o;
         o.pos = float4(xy.x / max(u.aspect, 0.01), xy.y, 0.0, 1.0);
         o.front = clamp((p.z + 1.0) * 0.5, 0.0, 1.0);
-        o.size = u.pointSize * s * (0.45 + 0.85 * o.front) * (1.0 + 0.25 * k + 2.0 * jump);
+        o.size = u.pointSize * s * (0.45 + 0.85 * o.front) * (1.0 + 0.12 * k + 1.2 * jump);
         o.ring = 0.0;
         return o;
     }
@@ -158,21 +158,22 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         // Frame rate follows attention: smooth while Jarvis is active, gentle at rest, slower still in the background.
         let resting = idle && intensity < 0.05
-        let fps = resting ? (view.window?.isKeyWindow == true ? 20 : 10) : 60
+        let fps = resting ? (view.window?.isKeyWindow == true ? 30 : 15) : 60
         if view.preferredFramesPerSecond != fps { view.preferredFramesPerSecond = fps }
         let now = CACurrentMediaTime()
         let dt = Float(min(now - last, 0.1))
         last = now
-        intensity += (targetIntensity - intensity) * min(1, dt * 1.5)
-        let goalSpeed = targetSpeed * (1 + 3.5 * intensity)
-        speed += (goalSpeed - speed) * min(1, dt * 2)
-        u.energy += (targetEnergy + 1.5 * intensity - u.energy) * min(1, dt * 2)
+        // Everything eases over a few seconds, so changes in pace feel calm rather than sudden.
+        intensity += (targetIntensity - intensity) * min(1, dt * 0.6)
+        let goalSpeed = targetSpeed * (1 + 1.2 * intensity)
+        speed += (goalSpeed - speed) * min(1, dt * 0.7)
+        u.energy += (targetEnergy + 0.5 * intensity - u.energy) * min(1, dt * 0.7)
         var lvl = targetLevel
         if speaking { lvl = max(lvl, 0.18 + 0.14 * Float(sin(now * 9) * 0.5 + 0.5)) }
         smoothLevel += (lvl - smoothLevel) * min(1, dt * 10)
         u.level = smoothLevel
         u.angle += dt * speed
-        u.ringAngle -= dt * (0.35 + speed * 0.8)
+        u.ringAngle -= dt * (0.22 + speed * 0.45)
         u.time = Float(now - start)
         u.color.w = intensity
         let size = view.drawableSize
@@ -222,11 +223,11 @@ struct ParticleSphereView: NSViewRepresentable {
         r.targetIntensity = Float(min(max(intensity, 0), 1))
         let (speed, energy): (Float, Float)
         switch phase {
-        case .idle: (speed, energy) = (0.18, 0.4)
-        case .listening: (speed, energy) = (0.32, 0.75)
-        case .thinking: (speed, energy) = (0.85, 1.25)
-        case .acting: (speed, energy) = (1.1, 1.45)
-        case .speaking: (speed, energy) = (0.42, 1.0)
+        case .idle: (speed, energy) = (0.16, 0.4)
+        case .listening: (speed, energy) = (0.24, 0.65)
+        case .thinking: (speed, energy) = (0.34, 0.85)
+        case .acting: (speed, energy) = (0.4, 0.95)
+        case .speaking: (speed, energy) = (0.26, 0.75)
         }
         r.targetSpeed = speed
         r.targetEnergy = energy

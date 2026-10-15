@@ -289,11 +289,11 @@ final class OrbLayerView: NSView {
             self.still = still
             let speed: Float, pulse: Float, particles: Float
             switch phase {
-            case .idle: (speed, pulse, particles) = (0.55, 1, 10)
-            case .listening: (speed, pulse, particles) = (1.4, 2, 28)
-            case .thinking: (speed, pulse, particles) = (2.2, 1.6, 42)
-            case .acting: (speed, pulse, particles) = (2.8, 1.8, 55)
-            case .speaking: (speed, pulse, particles) = (1.2, 4, 30)
+            case .idle: (speed, pulse, particles) = (0.5, 1, 10)
+            case .listening: (speed, pulse, particles) = (0.8, 1.4, 20)
+            case .thinking: (speed, pulse, particles) = (1.1, 1.3, 28)
+            case .acting: (speed, pulse, particles) = (1.3, 1.4, 34)
+            case .speaking: (speed, pulse, particles) = (0.9, 2, 22)
             }
             setSpeed(atomLayer, still ? 0 : speed)
             setSpeed(pulseLayer, still ? 0 : pulse)
