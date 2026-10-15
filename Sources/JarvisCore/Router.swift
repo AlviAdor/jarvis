@@ -3,9 +3,11 @@ import Foundation
 public struct Router: Sendable {
     public init() {}
 
+    /// Only requests that need eyes on the screen start with a screenshot; operating apps goes through
+    /// their real controls first, which is faster and more precise.
     private static let screenWords = [
-        "open ", "click", "scroll", "close ", "go to", "search for", "press ", "on my screen", "drag",
-        "switch to", "take a screenshot", "what's on my screen", "what is on my screen", "fill in", "fill out",
+        "on my screen", "on the screen", "what's on screen", "take a screenshot", "look at my screen", "see my screen",
+        "what am i looking at", "drag ", "fill in the form", "fill out the form",
     ]
     private static let webWords = [
         "latest", "news", "weather", "score", "price of", "stock", "today's", "who won",
@@ -21,7 +23,9 @@ public struct Router: Sendable {
         "remember", "remind", "schedule", "every day", "every morning", "every evening", "every week",
         "timer", "alarm", "email", "e-mail", " mail", "inbox", "file", "folder", "document", "clipboard",
         "copy ", "paste", "download", "git ", "repo", "command", "terminal", " open ", " quit ", " launch",
-        " type ", "clean", "free up", "organi", "tidy", "duplicate", "trash", "calendar", "meeting",
+        " type ", " click", " press ", " close ", " switch to", " go to", " scroll", " menu", " window", " tab",
+        " browser", " page", " move ", " rename", " zip", " folder", " spotify", " playlist", " git ", " commit",
+        " test", " build", " api", " database", " sqlite", "clean", "free up", "organi", "tidy", "duplicate", "trash", "calendar", "meeting",
         " event", "appointment", "agenda", "reminder", "contact", "phone number", " note", "imessage",
         " message ", " text ", " music", " song", " play", " pause", " skip", "volume", " mute", "brightness",
         "dark mode", "light mode", "wi-fi", "wifi", "shortcut", " lock ", "lock the", "lock my", "setting",
@@ -80,9 +84,6 @@ public struct Router: Sendable {
     /// Free first pass; returns nil when a model should decide.
     public func heuristic(_ text: String) -> Mode? {
         let s = text.lowercased()
-        let words = s.split(separator: " ")
-        // "Open Safari" alone is one tool call; no need to look at the screen.
-        if s.hasPrefix("open "), words.count <= 3, !s.contains(".") { return .chat }
         if Self.screenWords.contains(where: { s.contains($0) }) { return .screen }
         if Self.webWords.contains(where: { s.contains($0) }) { return .web }
         if Self.hardWords.contains(where: { s.contains($0) }) || s.split(separator: " ").count > 120 { return .hard }

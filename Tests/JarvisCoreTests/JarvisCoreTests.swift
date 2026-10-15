@@ -5,7 +5,8 @@ final class RouterTests: XCTestCase {
     let r = Router()
 
     func testHeuristics() {
-        XCTAssertEqual(r.heuristic("open Safari and go to apple.com"), .screen)
+        XCTAssertNotEqual(r.heuristic("open Safari and go to apple.com"), .screen)   // done with app controls, not screenshots
+        XCTAssertEqual(r.heuristic("what's on my screen right now"), .screen)
         XCTAssertEqual(r.heuristic("what's the weather in Dhaka"), .web)
         XCTAssertEqual(r.heuristic("how are you"), .chat)
         XCTAssertEqual(r.heuristic("analyze this strategy and compare the options for my startup in detail please"), .hard)

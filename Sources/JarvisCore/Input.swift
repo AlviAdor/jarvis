@@ -53,8 +53,28 @@ public enum Input {
         }
     }
 
-    public static func scroll(dy: Int) {
-        post(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: Int32(dy), wheel2: 0, wheel3: 0))
+    public static func scroll(dy: Int, dx: Int = 0) {
+        post(CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0))
+    }
+
+    /// Presses at one point and releases at another, moving visibly in between.
+    public static func drag(from a: CGPoint, to b: CGPoint) async {
+        await move(to: a)
+        if KillSwitch.shared.tripped { return }
+        post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: a, mouseButton: .left))
+        let steps = 24
+        for i in 1...steps {
+            if KillSwitch.shared.tripped { break }
+            let t = CGFloat(i) / CGFloat(steps)
+            let p = CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+            post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left))
+            try? await Task.sleep(nanoseconds: 12_000_000)
+        }
+        post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: b, mouseButton: .left))
+    }
+
+    public static func button(down: Bool, at p: CGPoint) {
+        post(CGEvent(mouseEventSource: nil, mouseType: down ? .leftMouseDown : .leftMouseUp, mouseCursorPosition: p, mouseButton: .left))
     }
 
     private static let keyCodes: [String: CGKeyCode] = {
