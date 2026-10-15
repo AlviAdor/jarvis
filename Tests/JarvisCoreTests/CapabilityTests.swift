@@ -424,3 +424,11 @@ final class ConversationFlowTests: XCTestCase {
         XCTAssertTrue(s.bargeIn)
     }
 }
+
+final class AlertKindTests: XCTestCase {
+    func testEachWarningSaysWhatItIsAbout() {
+        let s = MacCareTests().snapshot(battery: 8, free: 3_000_000_000, pressure: "critical", thermal: "serious")
+        XCTAssertEqual(SystemMonitor.alertItems(s).map(\.kind), [.battery, .storage, .memory, .thermal])
+        XCTAssertEqual(SystemMonitor.alerts(s).count, 4)
+    }
+}

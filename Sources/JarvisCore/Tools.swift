@@ -381,7 +381,7 @@ public final class ToolBox: @unchecked Sendable {
             let secs = max(1, int("seconds") ?? 60)
             let label = str("label").isEmpty ? "Timer" : str("label")
             let note = notify
-            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(secs)) { note("Jarvis", "\(label) is done.") }
+            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(secs)) { note("Timer", "\(label) is done.") }
             return ToolResult("Timer set for \(secs) seconds.")
         case "read_file":
             guard let url = allowed(str("path")) else { return ToolResult("That path isn't in an allowed folder.") }

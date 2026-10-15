@@ -262,26 +262,34 @@ public final class SystemMonitor: @unchecked Sendable {
         return f.string(from: t) ?? "\(Int(t / 60)) minutes"
     }
 
-    /// Things worth telling the user about without being asked.
-    public static func alerts(_ s: MacSnapshot) -> [String] {
-        var out: [String] = []
+    /// Something worth telling the user about without being asked, and what it's about.
+    public struct Alert: Sendable, Equatable {
+        public enum Kind: String, Sendable { case battery, storage, memory, thermal, batteryHealth }
+        public let kind: Kind
+        public let text: String
+    }
+
+    public static func alertItems(_ s: MacSnapshot) -> [Alert] {
+        var out: [Alert] = []
         if let b = s.battery, !b.onAC, b.percent <= 15 {
-            out.append("Battery is at \(b.percent)%. Plug in soon.")
+            out.append(Alert(kind: .battery, text: "Battery is at \(b.percent)%. Plug in soon."))
         }
         if s.diskTotal > 0, s.diskFree < 10_000_000_000 || Double(s.diskFree) / Double(s.diskTotal) < 0.05 {
-            out.append("Only \(bytes(s.diskFree)) of disk space is left. I can free some up if you like.")
+            out.append(Alert(kind: .storage, text: "Only \(bytes(s.diskFree)) of disk space is left. I can free some up if you like."))
         }
         if s.pressure == "critical" {
-            out.append("Memory is under heavy pressure. Closing a few apps will speed things up.")
+            out.append(Alert(kind: .memory, text: "Memory is under heavy pressure. Closing a few apps will speed things up."))
         }
         if s.thermal == "serious" || s.thermal == "critical" {
-            out.append("Your Mac is running hot and may be slowing itself down.")
+            out.append(Alert(kind: .thermal, text: "Your Mac is running hot and may be slowing itself down."))
         }
         if let h = s.battery?.condition, h != "Good", !h.isEmpty {
-            out.append("macOS reports the battery condition as \(h).")
+            out.append(Alert(kind: .batteryHealth, text: "macOS reports the battery condition as \(h)."))
         }
         return out
     }
+
+    public static func alerts(_ s: MacSnapshot) -> [String] { alertItems(s).map(\.text) }
 
     /// A plain report the model (or the user) can read.
     public static func report(_ s: MacSnapshot, top: (cpu: [ProcessUsage], memory: [ProcessUsage])? = nil, focus: String = "all") -> String {
