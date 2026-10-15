@@ -179,6 +179,17 @@ private struct ModelsTab: View {
             } header: { Text("Claude") }
 
             Section {
+                let resting = QuotaBook.shared.status()
+                if resting.isEmpty {
+                    Text("Every model has free requests available.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(resting, id: \.self) { Text($0).font(.callout) }
+                    Button("Try them again now") { QuotaBook.shared.clear(); model.flash("Cleared") }
+                }
+                Hint("Gemini's free tier gives each model a few requests a minute and a daily allowance; some Pro models have none. When one runs out, Jarvis switches to another model and comes back when it resets. AI Studio's usage page updates late and doesn't show refused requests.")
+            } header: { Text("Free tier") }
+
+            Section {
                 Stepper("Cloud requests per day: \(model.store.value.dailyRequestCap)", value: bind(model, \.dailyRequestCap), in: 20...5000, step: 20)
                 Stepper("Most steps for a screen task: \(model.store.value.maxSteps)", value: bind(model, \.maxSteps), in: 5...100, step: 5)
             } header: { Text("Limits") }
@@ -487,6 +498,11 @@ private struct LookTab: View {
                 Text("Dark").tag("dark")
                 Text("Light").tag("light")
                 Text("Match system").tag("system")
+            }
+            .pickerStyle(.segmented)
+            Picker("Orb", selection: bind(model, \.orbStyle)) {
+                Text("Particle sphere").tag("sphere")
+                Text("Nucleus").tag("nucleus")
             }
             .pickerStyle(.segmented)
             ColourControls()

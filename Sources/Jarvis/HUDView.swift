@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 import JarvisCore
 
 /// Shows the welcome tour until setup is done, then the HUD. Both sit on the same glass pane.
@@ -10,16 +11,22 @@ struct RootView: View {
     var body: some View {
         Group {
             if model.needsOnboarding {
-                OnboardingView().frame(width: 780, height: 640)
+                OnboardingView()
+                    .frame(maxWidth: 780)
+                    .frame(minWidth: 700, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
             } else {
-                HUDView().frame(minWidth: 560, idealWidth: 600, minHeight: 720, idealHeight: 800)
+                HUDView().frame(minWidth: 620, maxWidth: .infinity, minHeight: 560, maxHeight: .infinity)
             }
         }
         .background(GlassBackdrop(accent: model.accent, busy: model.busy))
         .background(WindowChrome())
         .preferredColorScheme(model.colorScheme)
         .tint(model.accent)
-        .onAppear { model.openMainWindow = { openWindow(id: "hud") } }
+        .onAppear {
+            model.openMainWindow = { openWindow(id: "hud") }
+            fitWindow(force: model.needsOnboarding)
+        }
+        .onChange(of: model.needsOnboarding) { _, _ in fitWindow(force: true) }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) { note in
             guard let w = note.object as? NSWindow, w.identifier?.rawValue.contains("hud") == true else { return }
             model.windowVisible = w.occlusionState.contains(.visible) && w.isVisible
@@ -27,45 +34,74 @@ struct RootView: View {
     }
 }
 
+extension RootView {
+    /// Sizes the window for what it's showing: setup gets room for its pages, the main view its own shape.
+    /// The main view keeps whatever size the user gave it unless it's too small; nothing exceeds the screen.
+    func fitWindow(force: Bool) {
+        DispatchQueue.main.async {
+            guard let w = NSApp.windows.first(where: { $0.identifier?.rawValue.contains("hud") == true }),
+                  let screen = w.screen ?? NSScreen.main else { return }
+            let setup = model.needsOnboarding
+            let want = setup ? CGSize(width: 840, height: 760) : CGSize(width: 880, height: 720)
+            let minimum = setup ? CGSize(width: 700, height: 600) : CGSize(width: 620, height: 560)
+            let current = w.contentLayoutRect.size
+            guard force || current.width < minimum.width || current.height < minimum.height else { return }
+            let vis = screen.visibleFrame
+            let size = CGSize(width: min(want.width, vis.width - 40), height: min(want.height, vis.height - 40))
+            var frame = w.frameRect(forContentRect: CGRect(origin: .zero, size: size))
+            frame.origin = CGPoint(x: vis.midX - frame.width / 2, y: vis.midY - frame.height / 2)
+            w.setFrame(frame, display: true, animate: w.isVisible)
+        }
+    }
+}
+
 struct HUDView: View {
     @EnvironmentObject var model: AppModel
+    @State private var showHistory = false
+    @State private var dropping = false
 
     var body: some View {
         ZStack(alignment: .top) {
-            VStack(spacing: 12) {
-                TitleBar()
-                OrbStage(telemetry: model.telemetry)
-                StatusLine(voice: model.voice, phase: model.phase, accent: model.accent, hotkey: model.store.value.hotkey)
-                if model.store.value.showTelemetry {
-                    TelemetryStrip(telemetry: model.telemetry)
-                }
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 12) {
-                        if !model.answer.isEmpty || model.busy {
-                            AnswerCard()
-                                .transition(.opacity.combined(with: .move(edge: .bottom)))
-                        } else if model.steps.isEmpty {
-                            Suggestions()
-                                .transition(.opacity)
-                        }
-                        if !model.steps.isEmpty {
-                            ActivityCard(steps: model.steps, accent: model.accent, running: model.busy)
-                                .transition(.opacity)
-                        }
-                        if model.history.count > 1 {
-                            HistorySection()
-                        }
+            VStack(spacing: 0) {
+                TopBar(showHistory: $showHistory)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 14)
+                Spacer(minLength: 6)
+                SphereStage()
+                Spacer(minLength: 6)
+                VStack(spacing: 14) {
+                    AnswerArea()
+                    if !model.steps.isEmpty {
+                        ActivityCard(steps: model.steps, accent: model.accent, running: model.busy)
+                            .frame(maxWidth: 560)
+                            .transition(.opacity)
                     }
-                    .padding(.vertical, 2)
+                    if model.store.value.showTelemetry {
+                        TelemetryStrip(telemetry: model.telemetry)
+                            .frame(maxWidth: 560)
+                    }
+                    Composer()
+                        .frame(maxWidth: 640)
+                    if model.store.value.userDetails { DetailsView().frame(maxWidth: 640) }
                 }
-                InputBar()
-                if model.store.value.userDetails { DetailsView() }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 22)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
-            .padding(.bottom, 18)
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.answer.isEmpty)
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.steps.count)
+            .animation(.easeOut(duration: 0.2), value: model.attachments.count)
+
+            if showHistory {
+                HStack {
+                    Spacer()
+                    HistoryPanel(open: $showHistory)
+                        .frame(width: 340)
+                        .padding(.top, 60)
+                        .padding(.trailing, 14)
+                        .padding(.bottom, 14)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
 
             if let n = model.notice {
                 Text(n)
@@ -73,183 +109,171 @@ struct HUDView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 9)
                     .glassCard(20)
-                    .padding(.top, 54)
+                    .padding(.top, 60)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .animation(.easeOut(duration: 0.2), value: model.notice)
-    }
-}
-
-// MARK: Title bar
-
-private struct TitleBar: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 8) {
-            OrbButton(icon: "xmark", size: 22) { NSApp.keyWindow?.close() }
-                .help("Close the window. Jarvis keeps listening.")
-            OrbButton(icon: "minus", size: 22) { NSApp.keyWindow?.miniaturize(nil) }
-                .help("Minimise")
-            Spacer(minLength: 8)
-            VStack(spacing: 1) {
-                Text("J·A·R·V·I·S")
-                    .font(.system(size: 13, weight: .heavy, design: .rounded))
-                    .tracking(4)
-                    .foregroundStyle(model.accent)
-                    .shadow(color: model.accent.opacity(0.6), radius: 6)
-                MicroLabel(text: statusText, color: model.voice.running ? .green.opacity(0.85) : .secondary)
+        .overlay {
+            if dropping {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(model.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+                    .background(model.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .overlay(Label("Drop to attach", systemImage: "paperclip").font(.title3.weight(.medium)))
+                    .padding(14)
+                    .allowsHitTesting(false)
             }
-            Spacer(minLength: 8)
-            Menu {
-                Picker("Model", selection: Binding(get: { model.store.value.modelChoice }, set: { model.store.value.modelChoice = $0 })) {
-                    Text("Auto").tag("auto")
-                    Text("Lite").tag("lite")
-                    Text("Flash").tag("flash")
-                    Text("Pro").tag("pro")
-                }
-            } label: {
-                Label(model.store.value.modelChoice.capitalized, systemImage: "cpu")
-                    .font(.caption.weight(.semibold))
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .glassCard(12)
-            .help("Which Gemini model answers. Auto picks the cheapest one that fits.")
-            UsageChip(usage: model.usage)
-            SettingsLink {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .frame(width: 22, height: 22)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .glassCard(11)
-            .help("Settings")
         }
-        .frame(height: 30)
-    }
-
-    private var statusText: String {
-        if !model.voice.running { return "mic off" }
-        if !model.store.geminiKey.isEmpty { return "online · gemini" + (model.store.claudeKey.isEmpty ? "" : " + claude") }
-        return "online · on-device"
+        .onDrop(of: [.fileURL, .image], isTargeted: $dropping) { providers in
+            Drops.load(providers) { urls, images in
+                model.attach(urls)
+                images.forEach { model.attachImage($0) }
+            }
+            return true
+        }
+        .animation(.easeOut(duration: 0.2), value: model.notice)
+        .animation(.easeOut(duration: 0.25), value: showHistory)
+        .animation(.easeOut(duration: 0.15), value: dropping)
     }
 }
 
-// MARK: Orb
+/// Turns dropped items into file URLs and image data.
+enum Drops {
+    static func load(_ providers: [NSItemProvider], done: @escaping @MainActor ([URL], [Data]) -> Void) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var urls: [URL] = []
+        var images: [Data] = []
+        for p in providers {
+            if p.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                group.enter()
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    if let url { lock.withLock { urls.append(url) } }
+                    group.leave()
+                }
+            } else if p.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                group.enter()
+                p.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    if let data { lock.withLock { images.append(data) } }
+                    group.leave()
+                }
+            }
+        }
+        group.notify(queue: .main) { MainActor.assumeIsolated { done(urls, images) } }
+    }
+}
 
-private struct OrbStage: View {
-    @EnvironmentObject var model: AppModel
-    @ObservedObject var telemetry: Telemetry
+// MARK: Top bar
+
+/// A small square control, like the rest of the instrument panel.
+private struct SquareButton: View {
+    let icon: String
+    var active = false
+    var tint: Color = .primary
+    let help: String
+    let action: () -> Void
+    @State private var hover = false
 
     var body: some View {
-        let ring = ringValues
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(active ? tint : Color.primary.opacity(hover ? 0.95 : 0.7))
+                .frame(width: 34, height: 34)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(active ? tint.opacity(0.18) : Color.primary.opacity(hover ? 0.08 : 0.04)))
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(active ? tint.opacity(0.6) : Color.primary.opacity(0.12), lineWidth: 0.8))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(help)
+    }
+}
+
+private struct TopBar: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject private var voice = AppModel.shared.voice
+    @Binding var showHistory: Bool
+
+    var body: some View {
         ZStack {
-            Reticle(length: 18)
-                .stroke(model.accent.opacity(0.35), style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                .frame(width: 262, height: 236)
-            LiveOrb(voice: model.voice, phase: model.phase, accent: model.accent, still: model.still, telemetry: ring)
-                .frame(width: 212, height: 212)
+            HStack(spacing: 8) {
+                Circle().fill(model.accent).frame(width: 6, height: 6).shadow(color: model.accent, radius: 4)
+                Text("JARVIS")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .tracking(4)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            HStack(spacing: 8) {
+                Rectangle().fill(model.accent.opacity(0.5)).frame(width: 18, height: 1)
+                Text(status)
+                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                    .tracking(2.2)
+                    .foregroundStyle(model.accent.opacity(0.9))
+                    .lineLimit(1)
+                Rectangle().fill(model.accent.opacity(0.5)).frame(width: 18, height: 1)
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                if !model.history.isEmpty {
+                    SquareButton(icon: "clock.arrow.circlepath", active: showHistory, tint: model.accent, help: "Earlier answers") { showHistory.toggle() }
+                }
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Color.primary.opacity(0.7))
+                        .frame(width: 34, height: 34)
+                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.04)))
+                        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(Color.primary.opacity(0.12), lineWidth: 0.8))
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
+                SquareButton(icon: "xmark", help: "Close the window. Jarvis keeps listening.") { NSApp.keyWindow?.close() }
+            }
+        }
+        .frame(height: 36)
+    }
+
+    private var status: String {
+        if model.phase == .idle, !voice.running { return "MIC OFF · PRESS \(HotKey.label(model.store.value.hotkey))" }
+        switch model.phase {
+        case .idle: return model.store.value.wakeWordEnabled ? "READY · SAY \u{201C}\(model.store.value.wakeWord.uppercased())\u{201D}" : "READY"
+        case .listening: return "LISTENING · GO AHEAD"
+        case .thinking: return model.thinkOn ? "THINKING DEEPLY" : "THINKING"
+        case .acting: return "ON YOUR SCREEN · ESC STOPS"
+        case .speaking: return "SPEAKING"
+        }
+    }
+}
+
+// MARK: Sphere
+
+private struct SphereStage: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject private var voice = AppModel.shared.voice
+
+    var body: some View {
+        GeometryReader { g in
+            let side = min(g.size.width * 0.62, g.size.height, 440)
+            ZStack {
+            RadialGradient(colors: [model.accent.opacity(0.22), model.accent.opacity(0.05), .clear], center: .center, startRadius: 4, endRadius: side * 0.42)
+                .frame(width: side, height: side)
+                .allowsHitTesting(false)
+            OrbView(phase: model.phase, accent: model.accent, still: model.still, level: voice.level,
+                    telemetry: model.store.value.showTelemetry ? ringValues : nil)
+                .frame(width: side, height: side)
                 .contentShape(Circle())
                 .onTapGesture { model.pushToTalk() }
                 .help("Tap, or press \(HotKey.label(model.store.value.hotkey)) anywhere, to talk")
-            if let s = telemetry.snapshot, model.store.value.showTelemetry {
-                ringLabel("CPU \(Int((s.cpu * 100).rounded()))%", angle: 30)
-                ringLabel("MEM \(Int((s.memoryFraction * 100).rounded()))%", angle: -90)
-                ringLabel(s.battery.map { "BAT \($0.percent)%" + ($0.charging ? " ⚡︎" : "") } ?? "AC", angle: 150)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: 240)
+        .frame(minHeight: 220)
     }
 
     private var ringValues: [Double]? {
-        guard model.store.value.showTelemetry, let s = telemetry.snapshot else { return nil }
+        guard let s = model.telemetry.snapshot else { return nil }
         return [s.cpu, s.memoryFraction, Double(s.battery?.percent ?? 100) / 100]
-    }
-
-    private func ringLabel(_ text: String, angle: Double) -> some View {
-        let r = 124.0
-        let a = angle * .pi / 180
-        return MicroLabel(text: text, color: model.accent.opacity(0.9))
-            .fixedSize()
-            .offset(x: cos(a) * r + (cos(a) > 0.2 ? 22 : cos(a) < -0.2 ? -22 : 0), y: -sin(a) * r)
-    }
-}
-
-struct StatusLine: View {
-    @ObservedObject var voice: VoiceEngine
-    let phase: Phase
-    let accent: Color
-    let hotkey: String
-
-    var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 7, height: 7)
-                    .shadow(color: color, radius: 4)
-                Text(text)
-                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-            }
-            Waveform(level: phase == .listening ? voice.level : 0, accent: accent)
-                .opacity(phase == .listening ? 1 : 0)
-        }
-        .animation(.easeOut(duration: 0.2), value: phase)
-    }
-
-    private var color: Color {
-        switch phase {
-        case .idle: return voice.running ? .green : .gray
-        case .listening: return accent
-        case .thinking: return .yellow
-        case .acting: return .orange
-        case .speaking: return accent
-        }
-    }
-
-    private var text: String {
-        switch phase {
-        case .idle:
-            if !voice.running { return "Microphone off" }
-            return hotkey == "off" ? "Say \u{201C}Jarvis\u{201D}" : "Say \u{201C}Jarvis\u{201D} or press \(HotKey.label(hotkey))"
-        case .listening: return voice.partial.isEmpty ? "Listening…" : voice.partial
-        case .thinking: return "Thinking…"
-        case .acting: return "Working on your screen. Press Esc to stop."
-        case .speaking: return "Speaking"
-        }
-    }
-}
-
-/// Bars that dance with your voice while Jarvis listens. Drawn in one pass at a fixed size,
-/// so a new mic level never makes the window lay itself out again.
-private struct Waveform: View {
-    let level: Float
-    let accent: Color
-
-    var body: some View {
-        Canvas { g, size in
-            let bars = 24
-            let w: CGFloat = 3, gap: CGFloat = 3
-            let total = CGFloat(bars) * (w + gap) - gap
-            var x = (size.width - total) / 2
-            for i in 0..<bars {
-                let env = 0.35 + 0.65 * abs(sin(Double(i) * 0.9 + Double(level) * 23))
-                let centre = 1 - abs(Double(i) - 11.5) / 13
-                let h = 3 + CGFloat(Double(level) * 26 * env * centre)
-                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                g.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(accent.opacity(0.85)))
-                x += w + gap
-            }
-        }
-        .frame(width: 150, height: 30)
     }
 }
 
@@ -332,47 +356,83 @@ private struct Gauge: View {
 
 // MARK: Answer
 
-private struct AnswerCard: View {
+/// The words: a greeting while idle, what you're saying while Jarvis listens, then the answer.
+private struct AnswerArea: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject private var voice = AppModel.shared.voice
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !model.question.isEmpty {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    MicroLabel(text: "You")
+        VStack(spacing: 10) {
+            if model.phase == .listening, !voice.partial.isEmpty {
+                Text(voice.partial)
+                    .font(.system(size: 24, weight: .light, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+            } else if model.answer.isEmpty {
+                if model.busy {
                     Text(model.question)
-                        .font(.callout)
+                        .font(.system(size: 22, weight: .light, design: .rounded))
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                         .lineLimit(2)
-                        .textSelection(.enabled)
+                    ThinkingDots(accent: model.accent)
+                } else {
+                    Text(greeting)
+                        .font(.system(size: 34, weight: .light, design: .rounded))
+                        .foregroundStyle(LinearGradient(colors: [.primary, model.accent], startPoint: .leading, endPoint: .trailing))
                 }
-            }
-            if model.answer.isEmpty {
-                ThinkingDots(accent: model.accent)
             } else {
-                Text(model.answer)
-                    .font(.system(size: 17, weight: .regular, design: .rounded))
-                    .lineSpacing(2)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 10) {
-                    if !model.answerSource.isEmpty {
-                        MicroLabel(text: model.answerSource, color: Color.secondary.opacity(0.8))
-                    }
-                    Spacer()
-                    Button { model.speakAgain() } label: { Image(systemName: "speaker.wave.2.fill") }
-                        .help("Say it again")
-                    Button { model.copyAnswer() } label: { Label("Copy", systemImage: "doc.on.doc") }
-                        .help("Copy the answer")
+                if !model.question.isEmpty {
+                    Text(model.question)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
-                .buttonStyle(.borderless)
-                .font(.caption)
+                ScrollView(showsIndicators: false) {
+                    MarkdownAnswer(text: model.answerMarkdown.isEmpty ? model.answer : model.answerMarkdown, accent: model.accent)
+                        .frame(maxWidth: 640)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxHeight: 260)
+                .fixedSize(horizontal: false, vertical: true)
             }
+            HStack(spacing: 12) {
+                Text(subtitle)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if !model.answer.isEmpty, !model.busy {
+                    Button { model.speakAgain() } label: { Image(systemName: "speaker.wave.2") }
+                        .help("Read aloud")
+                    Button { model.copyAnswer() } label: { Image(systemName: "doc.on.doc") }
+                        .help("Copy")
+                    Button { model.regenerate() } label: { Image(systemName: "arrow.clockwise") }
+                        .help("Try again")
+                    Button { model.editLast() } label: { Image(systemName: "pencil") }
+                        .help("Edit your question")
+                    ShareLink(item: model.answer) { Image(systemName: "square.and.arrow.up") }
+                        .help("Share")
+                }
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 12))
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .hudPanel(18, accent: model.accent)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var greeting: String {
+        let name = model.store.value.userName.split(separator: " ").first.map(String.init) ?? ""
+        let h = Calendar.current.component(.hour, from: Date())
+        let part = h < 5 ? "Hey" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : h < 22 ? "Good evening" : "Hey"
+        return name.isEmpty ? "\(part)." : "\(part), \(name)."
+    }
+
+    private var subtitle: String {
+        if !model.answer.isEmpty, !model.answerSource.isEmpty { return model.answerSource }
+        if model.busy { return model.phase == .acting ? "Working on your screen · Esc to stop" : "Working on it" }
+        let brain = model.store.geminiKey.isEmpty ? "On-device" : (model.store.claudeKey.isEmpty ? "Gemini" : "Claude + Gemini")
+        return "Say \u{201C}Jarvis\u{201D} or press \(HotKey.label(model.store.value.hotkey)) · \(brain) · remembers you"
     }
 }
 
@@ -491,36 +551,30 @@ private struct StepRow: View {
 
 // MARK: History
 
-private struct HistorySection: View {
+/// Earlier answers, opened from the clock button.
+private struct HistoryPanel: View {
     @EnvironmentObject var model: AppModel
-    @State private var open = false
+    @Binding var open: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Button { withAnimation(.easeOut(duration: 0.2)) { open.toggle() } } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: open ? "chevron.down" : "chevron.right").font(.caption2)
-                        MicroLabel(text: "Earlier · \(model.history.count - 1)")
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                MicroLabel(text: "Earlier · \(model.history.count)")
                 Spacer()
-                if open {
-                    Button("Clear") { model.clearHistory() }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                }
+                Button("New conversation") { model.clearHistory(); open = false }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                Button { open = false } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless)
             }
-            if open {
-                ForEach(model.history.dropLast().reversed()) { e in
-                    HistoryRow(exchange: e)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(model.history.reversed()) { e in HistoryRow(exchange: e) }
                 }
             }
         }
-        .padding(12)
-        .hudPanel(14, accent: model.accent)
+        .padding(14)
+        .glassCard(18)
     }
 }
 
@@ -542,96 +596,270 @@ private struct HistoryRow: View {
                     .help("Copy")
             }
             Text(exchange.answer)
-                .font(.system(size: 13, design: .rounded))
+                .font(.system(size: 13, design: .serif))
                 .textSelection(.enabled)
                 .lineLimit(6)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
         .onHover { hover = $0 }
     }
 }
 
-// MARK: Suggestions and input
-
-private struct Suggestions: View {
-    @EnvironmentObject var model: AppModel
-    private let items: [(String, String)] = [
-        ("gauge.with.dots.needle.67percent", "How's my Mac doing?"),
-        ("internaldrive", "Free up some disk space"),
-        ("calendar", "What's on my calendar today?"),
-        ("folder.badge.gearshape", "Organise my Downloads folder"),
-        ("rectangle.on.rectangle", "What's on my screen?"),
-        ("cloud.sun", "What's the weather today?"),
-        ("envelope", "Summarise my unread mail"),
-        ("sparkles", "What can you do?"),
-    ]
-
-    var body: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-            ForEach(items, id: \.1) { icon, text in
-                SuggestionButton(icon: icon, text: text)
-            }
-        }
-    }
-}
-
-private struct SuggestionButton: View {
-    @EnvironmentObject var model: AppModel
-    let icon: String
-    let text: String
-    @State private var hover = false
-
-    var body: some View {
-        Button { model.submit(text) } label: {
-            HStack(spacing: 8) {
-                Image(systemName: icon).foregroundStyle(model.accent).frame(width: 18)
-                Text(text).font(.callout).lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .hudPanel(13, accent: hover ? model.accent : model.accent.opacity(0.4))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hover = $0 }
-    }
-}
-
-private struct InputBar: View {
+/// Where you type, attach and choose tools, like the composer in modern AI apps.
+private struct Composer: View {
     @EnvironmentObject var model: AppModel
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(model.accent)
-                .padding(.leading, 8)
-            TextField("Ask Jarvis anything, or tell it what to do…", text: $model.typed)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14, design: .rounded))
-                .focused($focused)
-                .onSubmit { model.submit(model.typed) }
-            Button { model.pushToTalk() } label: {
-                Image(systemName: model.phase == .listening ? "waveform" : "mic.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 36, height: 36)
-                    .background(model.accent.opacity(model.phase == .listening ? 0.55 : 0.25), in: Circle())
+        VStack(alignment: .leading, spacing: 8) {
+            if !model.attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(model.attachments) { AttachmentChip(item: $0) }
+                    }
+                    .padding(.horizontal, 4)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .buttonStyle(.plain)
-            .help("Talk")
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Menu {
+                        Button { model.pickFiles() } label: { Label("Attach files…", systemImage: "paperclip") }
+                        Button { pasteFromClipboard() } label: { Label("Paste image or file", systemImage: "doc.on.clipboard") }
+                        Button { model.attachScreenshot() } label: { Label("Add a screenshot of my screen", systemImage: "camera.viewfinder") }
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 30, height: 30)
+                            .background(Color.primary.opacity(0.07), in: Circle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Attach files, images, PDFs, audio or video")
+                    TextField(placeholder, text: $model.typed, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14.5, design: .rounded))
+                        .lineLimit(1...5)
+                        .focused($focused)
+                        .onSubmit { send() }
+                    sendButton
+                }
+                HStack(spacing: 6) {
+                    ToolPill(title: "Search", icon: "globe", on: $model.searchOn, help: "Look things up on the web, with sources")
+                    ToolPill(title: "Think", icon: "lightbulb", on: $model.thinkOn, help: "Use the strongest model and think it through")
+                    ToolPill(title: "Screen", icon: "cursorarrow.rays", on: $model.screenOn, help: "Let Jarvis see and operate your screen")
+                    Spacer()
+                    Menu {
+                        Picker("Model", selection: binding(model, \.modelChoice)) {
+                            Text("Auto").tag("auto")
+                            Text("Lite · fastest").tag("lite")
+                            Text("Flash · balanced").tag("flash")
+                            Text("Pro · smartest").tag("pro")
+                        }
+                    } label: {
+                        Text(model.store.value.modelChoice.capitalized)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Which model answers")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .glassCard(22)
+        }
+    }
+
+    private var placeholder: String {
+        model.attachments.isEmpty ? "Ask anything, or drop files here" : "Ask about \(model.attachments.count == 1 ? "this file" : "these files")…"
+    }
+
+    private var canSend: Bool { !model.typed.trimmingCharacters(in: .whitespaces).isEmpty || !model.attachments.isEmpty }
+
+    @ViewBuilder private var sendButton: some View {
+        if model.busy {
             Button { model.stopEverything() } label: {
                 Image(systemName: "stop.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.red.opacity(model.busy ? 0.4 : 0.18), in: Circle())
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 32, height: 32)
+                    .background(Color.red.opacity(0.35), in: Circle())
             }
             .buttonStyle(.plain)
-            .help("Stop everything (Esc)")
+            .help("Stop (Esc)")
+        } else if canSend {
+            Button { send() } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.black)
+                    .frame(width: 32, height: 32)
+                    .background(model.accent, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Send")
+        } else {
+            Button { model.pushToTalk() } label: {
+                Image(systemName: model.phase == .listening ? "waveform" : "mic.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 32, height: 32)
+                    .background(model.accent.opacity(model.phase == .listening ? 0.55 : 0.22), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Talk (\(HotKey.label(model.store.value.hotkey)))")
         }
-        .padding(7)
-        .glassCard(25)
+    }
+
+    private func send() {
+        guard canSend else { return }
+        model.submit(model.typed)
+    }
+
+    private func pasteFromClipboard() {
+        let pb = NSPasteboard.general
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            model.attach(urls)
+        } else if let data = pb.data(forType: .png) ?? pb.data(forType: .tiff) {
+            model.attachImage(data)
+        } else {
+            model.flash("There's no image or file on the clipboard.")
+        }
+    }
+}
+
+private struct ToolPill: View {
+    @EnvironmentObject var model: AppModel
+    let title: String
+    let icon: String
+    @Binding var on: Bool
+    let help: String
+
+    var body: some View {
+        Button { on.toggle() } label: {
+            Label(title, systemImage: icon)
+                .font(.system(size: 11.5, weight: .medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .foregroundStyle(on ? model.accent : Color.secondary)
+                .background(on ? model.accent.opacity(0.16) : Color.primary.opacity(0.05), in: Capsule())
+                .overlay(Capsule().stroke(on ? model.accent.opacity(0.6) : Color.clear, lineWidth: 0.8))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+private struct AttachmentChip: View {
+    @EnvironmentObject var model: AppModel
+    let item: Attachment
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let t = item.thumbnail, let img = NSImage(data: t) {
+                Image(nsImage: img).resizable().scaledToFill().frame(width: 34, height: 34).clipShape(RoundedRectangle(cornerRadius: 7))
+            } else {
+                Image(systemName: item.icon)
+                    .font(.system(size: 15))
+                    .foregroundStyle(model.accent)
+                    .frame(width: 34, height: 34)
+                    .background(model.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.name).font(.caption.weight(.medium)).lineLimit(1).frame(maxWidth: 140, alignment: .leading)
+                Text("\(item.kind.rawValue.uppercased()) · \(item.sizeLabel)").font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            Button { model.removeAttachment(item.id) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                .buttonStyle(.plain)
+                .help("Remove")
+        }
+        .padding(6)
+        .glassCard(12)
+    }
+}
+
+/// An answer with light formatting: bold, italics, links and inline code, plus code blocks with a copy button.
+/// Short plain answers are centred; anything with structure reads left to right.
+struct MarkdownAnswer: View {
+    let text: String
+    let accent: Color
+
+    private struct Segment: Identifiable {
+        let id: Int
+        let code: Bool
+        let lang: String
+        let body: String
+    }
+
+    private var segments: [Segment] {
+        var out: [Segment] = []
+        let parts = text.components(separatedBy: "```")
+        for (i, part) in parts.enumerated() {
+            if i % 2 == 1 {
+                var lines = part.components(separatedBy: "\n")
+                let lang = lines.first?.trimmingCharacters(in: .whitespaces) ?? ""
+                if !lines.isEmpty { lines.removeFirst() }
+                out.append(Segment(id: i, code: true, lang: lang, body: lines.joined(separator: "\n").trimmingCharacters(in: .newlines)))
+            } else if !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                out.append(Segment(id: i, code: false, lang: "", body: part.trimmingCharacters(in: .whitespacesAndNewlines)))
+            }
+        }
+        return out
+    }
+
+    private var structured: Bool { text.contains("```") || text.components(separatedBy: "\n").count > 2 || text.count > 260 }
+
+    var body: some View {
+        VStack(alignment: structured ? .leading : .center, spacing: 10) {
+            ForEach(segments) { seg in
+                if seg.code {
+                    CodeBlock(code: seg.body, lang: seg.lang, accent: accent)
+                } else {
+                    Text(Self.attributed(seg.body))
+                        .font(.system(size: structured ? 16 : 23, weight: .light, design: .rounded))
+                        .lineSpacing(structured ? 3 : 4)
+                        .multilineTextAlignment(structured ? .leading : .center)
+                        .textSelection(.enabled)
+                        .tint(accent)
+                        .frame(maxWidth: .infinity, alignment: structured ? .leading : .center)
+                }
+            }
+        }
+    }
+
+    static func attributed(_ s: String) -> AttributedString {
+        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: s, options: opts)) ?? AttributedString(s)
+    }
+}
+
+private struct CodeBlock: View {
+    @EnvironmentObject var model: AppModel
+    let code: String
+    let lang: String
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(lang.isEmpty ? "code" : lang).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
+                Spacer()
+                Button { model.copy(code) } label: { Label("Copy", systemImage: "doc.on.doc").font(.system(size: 10.5)) }
+                    .buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.06))
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(10)
+            }
+        }
+        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(accent.opacity(0.25), lineWidth: 0.8))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 

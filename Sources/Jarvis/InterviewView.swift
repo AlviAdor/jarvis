@@ -197,7 +197,7 @@ struct InterviewPage: View {
             }
             HStack(alignment: .center, spacing: 22) {
                 OrbView(phase: orbPhase, accent: model.accent, still: model.store.value.reduceMotion, level: voice.level)
-                    .frame(width: 150, height: 150)
+                    .frame(width: 170, height: 170)
                 VStack(alignment: .leading, spacing: 10) {
                     if session.stage == .ready {
                         Text("Ready when you are. Make sure you're somewhere fairly quiet.")

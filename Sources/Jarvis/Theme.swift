@@ -130,15 +130,12 @@ struct GlassBackdrop: View {
     var body: some View {
         ZStack {
             if #available(macOS 26.0, *) {
-                Color.clear.glassEffect(.regular.tint(scheme == .dark ? .black.opacity(0.42) : .white.opacity(0.25)), in: ConcentricRectangle())
+                Color.clear.glassEffect(.regular.tint(scheme == .dark ? .black.opacity(0.62) : .white.opacity(0.3)), in: ConcentricRectangle())
             } else {
                 VisualEffect(material: .hudWindow)
-                Rectangle().fill(scheme == .dark ? Color.black.opacity(0.25) : Color.white.opacity(0.2))
+                Rectangle().fill(scheme == .dark ? Color.black.opacity(0.45) : Color.white.opacity(0.25))
             }
-            CircuitGrid()
-                .stroke(accent.opacity(scheme == .dark ? 0.07 : 0.06), lineWidth: 0.6)
-                .drawingGroup()
-            RadialGradient(colors: [accent.opacity(busy ? 0.26 : 0.14), .clear], center: .init(x: 0.5, y: 0.26), startRadius: 10, endRadius: 360)
+            RadialGradient(colors: [accent.opacity(busy ? 0.16 : 0.07), .clear], center: .init(x: 0.5, y: 0.42), startRadius: 10, endRadius: 380)
                 .animation(.easeInOut(duration: 0.8), value: busy)
         }
         .ignoresSafeArea()

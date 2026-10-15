@@ -78,6 +78,14 @@ final class AppModel: ObservableObject {
     @Published var voices: [VoiceOption] = []
     @Published var permissions: [PermissionItem] = []
     @Published var about = ""
+    // The composer: files waiting to be sent, and tools switched on for the next requests.
+    @Published var attachments: [Attachment] = []
+    @Published var searchOn = false
+    @Published var thinkOn = false
+    @Published var screenOn = false
+    /// The answer as the model wrote it, with code blocks and lists, for display.
+    @Published var answerMarkdown = ""
+    private var lastAttachments: [Attachment] = []
     /// True while Jarvis is talking.
     @Published private(set) var speaking = false
     /// Where the setup guide opens: returning users skip what they've already done.
@@ -203,6 +211,7 @@ final class AppModel: ObservableObject {
         startHealthWatch()
         if store.value.rememberConversations { restoreHistory() } else { memory.clearConversation() }
         watchStrain()
+        refreshModelList()
     }
 
     /// Shows the earlier answers again after a restart.
@@ -348,12 +357,73 @@ final class AppModel: ObservableObject {
     }
 
     func submit(_ text: String) {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, !needsOnboarding else { return }
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needsOnboarding, !t.isEmpty || !attachments.isEmpty else { return }
+        if t.isEmpty { t = attachments.count == 1 ? "What is this? Summarise it." : "What are these? Summarise them." }
+        let files = attachments
+        attachments = []
         typed = ""
         job?.cancel()
-        job = Task { await handle(t) }
+        job = Task { await handle(t, files: files) }
     }
+
+    /// Asks the last question again.
+    func regenerate() {
+        guard !question.isEmpty, !busy else { return }
+        let q = question, files = lastAttachments
+        job?.cancel()
+        job = Task { await handle(q, files: files) }
+    }
+
+    /// Puts the last question back in the box to change it.
+    func editLast() {
+        guard !question.isEmpty else { return }
+        typed = question
+        attachments = lastAttachments
+    }
+
+    // MARK: Attachments
+
+    func attach(_ urls: [URL]) {
+        for u in urls {
+            do {
+                let a = try Attachment.load(u)
+                guard attachments.reduce(0, { $0 + $1.size }) + a.size <= Attachment.maxTotal else {
+                    flash("That's more than Jarvis can send at once (about 18 MB).")
+                    return
+                }
+                attachments.append(a)
+            } catch {
+                flash(error.localizedDescription)
+            }
+        }
+    }
+
+    func attachImage(_ data: Data, name: String = "Pasted image") {
+        do { attachments.append(try Attachment.image(data, name: name)) } catch { flash(error.localizedDescription) }
+    }
+
+    func attachScreenshot() {
+        Task {
+            do {
+                let shot = try await Screen.capture(maxDim: 2048)
+                attachImage(shot.jpeg, name: "Screenshot")
+            } catch {
+                flash(Friendly.message(error))
+            }
+        }
+    }
+
+    func pickFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.message = "Choose files for Jarvis: images, PDFs, documents, code, audio or short videos."
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK { attach(panel.urls) }
+    }
+
+    func removeAttachment(_ id: UUID) { attachments.removeAll { $0.id == id } }
 
     /// jarvis://ask?q=... and jarvis://listen let Shortcuts and Siri hand Jarvis a request.
     func handle(url: URL) {
@@ -391,12 +461,14 @@ final class AppModel: ObservableObject {
 
     // MARK: Pipeline
 
-    private func handle(_ text: String) async {
+    private func handle(_ text: String, files: [Attachment] = []) async {
         guard termsAccepted else { showWindow(); return }
         let began = Date()
         phase = .thinking
         question = text
+        lastAttachments = files
         answer = ""
+        answerMarkdown = ""
         answerSource = ""
         steps = []
         overlayText = text
@@ -415,6 +487,12 @@ final class AppModel: ObservableObject {
             mode = pm
             followUp = true
         }
+        // Switches in the composer win, and attachments always go to a model that can see them.
+        let forced: Mode? = screenOn ? .screen : searchOn ? .web : thinkOn ? .hard : nil
+        if let forced { mode = forced }
+        if forced != nil || !files.isEmpty { followUp = true }
+        if !files.isEmpty, mode == nil { mode = .chat }
+        if !files.isEmpty { apply(ActionEvent(title: "Reading \(files.count == 1 ? files[0].name : "\(files.count) files")", detail: files.map(\.name).joined(separator: ", "), state: .done, icon: "paperclip")) }
 
         // Questions about the Mac itself: answered from a live reading, on this Mac when possible.
         if !followUp, Router.isMacStatus(text) {
@@ -451,17 +529,8 @@ final class AppModel: ObservableObject {
         let client = GeminiClient(apiKey: store.geminiKey)
 
         do {
-            if mode == nil, !store.geminiKey.isEmpty {
-                var ask = text
-                if let prev = previous, let q = memory.context().last(where: { $0.role == "user" }) {
-                    ask = "Previous request: \(q.text)\nPrevious answer: \(prev.text.prefix(300))\n\nLatest request: \(text)"
-                }
-                let r = try await client.generate(model: s.liteModel, system: Router.classifierPrompt,
-                                                  contents: [["role": "user", "parts": [["text": ask]]]],
-                                                  maxTokens: 8, thinking: GeminiAgentThinking.minimal(s.liteModel))
-                usage.add(r.usage)
-                mode = Router.parse(r.text)
-            }
+            // Anything not obviously web, screen or deep thinking goes to the tool-using assistant, which can
+            // search the web or take over the screen itself; no separate request is spent on sorting it.
             var m = mode ?? .chat
             setWorkload(Self.weight(of: m))
             let logger: @Sendable (String) -> Void = { [weak self] line in Task { @MainActor in self?.log(line) } }
@@ -482,7 +551,7 @@ final class AppModel: ObservableObject {
             while true {
                 phase = m == .screen ? .acting : .thinking
                 let tools = makeTools(s, mcp: mcpTools)
-                (outcome, provider) = try await runAgent(text, mode: m, tier: override ?? router.tier(for: m, settings: s),
+                (outcome, provider) = try await runAgent(text, files: files, mode: m, tier: override ?? router.tier(for: m, settings: s),
                                                          chain: router.chain(for: m, settings: s, from: override),
                                                          client: client, tools: tools, settings: s, log: logger)
                 // The model decided this needs the screen: run it again with eyes and hands.
@@ -504,7 +573,8 @@ final class AppModel: ObservableObject {
                 }
                 break
             }
-            record(text, outcome.summary, source: "\(provider) · \(Self.elapsed(began))", mode: m.rawValue)
+            let said = files.isEmpty ? text : text + " " + files.map(\.mention).joined(separator: " ")
+            record(said, outcome.summary, source: "\(provider) · \(Self.elapsed(began))", mode: m.rawValue)
         } catch is CancellationError {
             phase = .idle
         } catch {
@@ -536,7 +606,8 @@ final class AppModel: ObservableObject {
     /// Grounded Google Search through Gemini, returned as text with its sources.
     nonisolated private static func webSearch(_ q: String, key: String, settings s: JarvisSettings, usage: @escaping @Sendable (Usage) -> Void) async -> String {
         let client = GeminiClient(apiKey: key)
-        for model in [s.flashModel, s.liteModel] {
+        let models = ([s.flashModel] + ModelPicker.ranked(.flash, in: s.knownModels).prefix(2) + [s.liteModel]).filter { QuotaBook.shared.usable($0) }
+        for model in models {
             do {
                 let r = try await client.generate(model: model, system: "Search the web and answer with the key facts, figures and dates. Plain text, under 150 words.",
                                                   contents: [["role": "user", "parts": [["text": q]]]],
@@ -617,6 +688,7 @@ final class AppModel: ObservableObject {
         if case .escalate(let m)? = LocalBrain.verdict(latest, finished: true), !decided { return .escalate(m) }
 
         let final = Self.clean(latest)
+        answerMarkdown = latest.trimmingCharacters(in: .whitespacesAndNewlines)
         answer = final
         overlayText = final
         answerSource = "\(engine == .apple ? "On this Mac" : "Local model") · \(Self.elapsed(began))"
@@ -652,14 +724,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Claude first when it's set up and healthy; any failure drops straight to Gemini.
-    private func runAgent(_ text: String, mode: Mode, tier: Tier, chain: [String], client: GeminiClient, tools: ToolBox,
+    private func runAgent(_ text: String, files: [Attachment] = [], mode: Mode, tier: Tier, chain: [String], client: GeminiClient, tools: ToolBox,
                           settings s: JarvisSettings, log logger: @escaping @Sendable (String) -> Void) async throws -> (AgentOutcome, String) {
-        if s.claudeEnabled, !store.claudeKey.isEmpty, mode != .web, Date() >= claudeBlockedUntil {
+        if s.claudeEnabled, !store.claudeKey.isEmpty, mode != .web, !files.contains(where: \.needsGemini), Date() >= claudeBlockedUntil {
             let model = s.claudeModelID(tier)
             let agent = ClaudeAgent(client: ClaudeClient(apiKey: store.claudeKey), model: model, settings: s,
                                     tools: tools, tracker: usage, profile: memory.profile(name: s.userName), log: logger)
             do {
-                return (try await agent.run(task: text, mode: mode, history: chatHistory()), "Claude")
+                return (try await agent.run(task: text, mode: mode, history: chatHistory(), attachments: files), "Claude")
             } catch is CancellationError {
                 throw CancellationError()
             } catch let e as LLMError {
@@ -677,7 +749,7 @@ final class AppModel: ObservableObject {
         }
         let agent = GeminiAgent(client: client, chain: chain, settings: s, tools: tools, tracker: usage,
                                 profile: memory.profile(name: s.userName), log: logger)
-        return (try await agent.run(task: text, mode: mode, history: chatHistory()), "Gemini")
+        return (try await agent.run(task: text, mode: mode, history: chatHistory(), attachments: files), "Gemini")
     }
 
     // MARK: Tests
@@ -689,6 +761,7 @@ final class AppModel: ObservableObject {
         var out = lines
         if !models.isEmpty {
             availableModels = models
+            store.value.knownModels = models
             out += useNewestModels(from: models)
         }
         geminiTest = out
@@ -918,6 +991,21 @@ final class AppModel: ObservableObject {
         strainTimer?.tolerance = 2
     }
 
+    /// Learns which Gemini models this key can use (free; listing doesn't count against quota),
+    /// so each tier has stand-ins when one model runs out of free requests.
+    private func refreshModelList() {
+        let key = store.geminiKey
+        guard !key.isEmpty || !store.keysLoaded else { return }
+        Task {
+            if !store.keysLoaded { try? await Task.sleep(nanoseconds: 2_000_000_000) }
+            let k = store.geminiKey
+            guard !k.isEmpty, let models = try? await GeminiClient(apiKey: k).listModels(), !models.isEmpty else { return }
+            availableModels = models
+            if store.value.knownModels != models { store.value.knownModels = models }
+            useNewestModels(from: models)
+        }
+    }
+
     // MARK: Ollama
 
     func setUpOllama() async {
@@ -930,7 +1018,7 @@ final class AppModel: ObservableObject {
             }
             ollamaBusy = "Installing Ollama with Homebrew… this takes a minute or two"
             let brew = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew") ? "/opt/homebrew/bin/brew" : "/usr/local/bin/brew"
-            _ = await Run.capture(brew, ["install", "ollama"], timeout: 900)
+            _ = await Run.capture(brew, ["install", "ollama"], timeout: 3600)
         }
         let up = await LocalBrain.shared.startOllama()
         ollamaModels = await LocalBrain.shared.ollamaModels(fresh: true)
@@ -962,6 +1050,7 @@ final class AppModel: ObservableObject {
 
     private func reply(_ text: String, source: String = "") {
         setWorkload(0, after: 1.5)
+        answerMarkdown = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let c = Self.clean(text)
         answer = c
         answerSource = source
@@ -1010,7 +1099,18 @@ final class AppModel: ObservableObject {
             }
         }
         if let g = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler) { monitors.append(g) }
-        if let l = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { handler($0); return $0 }) { monitors.append(l) }
+        if let l = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] e in
+            handler(e)
+            // ⌘V with an image (and no text) on the clipboard attaches it, as in other AI apps.
+            if e.modifierFlags.contains(.command), e.charactersIgnoringModifiers == "v", let self {
+                let pb = NSPasteboard.general
+                if pb.string(forType: .string) == nil, let data = pb.data(forType: .png) ?? pb.data(forType: .tiff) {
+                    Task { @MainActor in self.attachImage(data) }
+                    return nil
+                }
+            }
+            return e
+        }) { monitors.append(l) }
     }
 
     // MARK: Text helpers

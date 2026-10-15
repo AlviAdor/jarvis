@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0
+- Attachments: add images, PDFs, documents, code, audio and short videos with the + menu, by dragging them onto the window, or by pasting an image with ⌘V; a screenshot of the screen can be attached too
+- Composer like other AI apps: Search, Think and Screen switches, a model picker, and send, talk or stop in one button
+- Answers show formatting and code blocks with copy, and can be read aloud, copied, tried again, edited or shared
+- Particle sphere orb drawn on the GPU, with its own tilted orbital ring; the frame rate follows what Jarvis is doing and stops while hidden
+- Cleaner main window: status at the top, the orb, the answer, and the composer; earlier answers open from the clock button
+- Gemini free tier: Jarvis reads why a request was refused (per minute, per day, or not in the free tier), waits only as long as Google asks, rests that model and switches to another one, and explains in plain words when everything is used up; Settings, Models shows which models are resting
+- No request is spent on sorting questions any more, which leaves more of the free allowance for answers
+- The window sizes itself for setup and for the main view, within the screen
+
 ## 0.6.0
 - Setup is now a conversation: Jarvis asks its questions out loud, you answer by voice (or type), and it fills in your profile from what you say
 - The same answers teach Jarvis your voice, so the voiceprint comes from the person actually setting it up; "Only respond to my voice" switches on when it has enough

@@ -308,7 +308,25 @@ final class OrbLayerView: NSView {
     }
 }
 
-struct OrbView: NSViewRepresentable {
+/// Jarvis's orb in the style chosen in Settings: the particle sphere or the nucleus.
+struct OrbView: View {
+    let phase: Phase
+    let accent: Color
+    let still: Bool
+    var level: Float = 0
+    var telemetry: [Double]? = nil
+    @ObservedObject private var store = AppModel.shared.store
+
+    var body: some View {
+        if store.value.orbStyle == "nucleus" {
+            NucleusView(phase: phase, accent: accent, still: still, level: level, telemetry: telemetry)
+        } else {
+            ParticleSphereView(phase: phase, accent: accent, still: still, level: level)
+        }
+    }
+}
+
+struct NucleusView: NSViewRepresentable {
     let phase: Phase
     let accent: Color
     let still: Bool

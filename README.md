@@ -26,6 +26,11 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 - Disk cleanup: finds large files, old downloads, duplicates, caches and developer data, shows what's safe, and asks before removing anything. Your files go to the Trash so they can be restored
 - Folder tidying (Downloads, Desktop...) by kind, with one-step undo
 
+**Chat like the big AI apps**
+- Attach images, PDFs, documents, code, audio and video (drag, paste, or the + menu), or a screenshot of your screen
+- Search, Think and Screen switches, a model picker, and formatted answers with code blocks
+- Read aloud, copy, try again, edit and share any answer
+
 **Remembers you**
 - Keeps the conversation across restarts, so follow-ups like "and tomorrow?" just work
 - Gets to know you by talking during setup: it asks out loud, you answer, and it learns your voice from those answers. It keeps learning from what you mention, all stored on this Mac

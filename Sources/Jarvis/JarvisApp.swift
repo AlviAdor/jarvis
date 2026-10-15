@@ -54,7 +54,7 @@ struct JarvisApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 600, height: 800)
+        .defaultSize(width: 880, height: 720)
         .windowBackgroundDragBehavior(.enabled)
 
         Settings {
