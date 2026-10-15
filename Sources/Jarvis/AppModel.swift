@@ -106,7 +106,6 @@ final class AppModel: ObservableObject {
     var openMainWindow: (() -> Void)?
     private var lastLearn = Date.distantPast
     private var voiceFallbackNoted = Date.distantPast
-    private var strainTimer: Timer?
     private var systemStrained = false
     private var job: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
@@ -114,6 +113,7 @@ final class AppModel: ObservableObject {
     private var highlightTask: Task<Void, Never>?
     private var healthTimer: Timer?
     private var lastAlerts: [String: Date] = [:]
+    private var extremeSince: [SystemMonitor.Alert.Kind: Date] = [:]
     private var monitors: [Any] = []
     private var bag = Set<AnyCancellable>()
     private var started = false
@@ -151,6 +151,7 @@ final class AppModel: ObservableObject {
 
         store.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         usage.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        telemetry.$snapshot.compactMap { $0 }.sink { [weak self] snap in self?.noteStrain(snap) }.store(in: &bag)
         voice.$armed.sink { [weak self] armed in
             guard let self else { return }
             if armed, self.phase == .idle || self.phase == .speaking {
@@ -881,20 +882,28 @@ final class AppModel: ObservableObject {
     // MARK: Mac care
 
     /// Every five minutes, a cheap reading; anything worrying is said once an hour at most.
+    /// One light reading every ten minutes (a few numbers from macOS, no app scanning). Nothing is said
+    /// unless the Mac has been under extreme strain for a long stretch, and then only as a quiet notification.
     private func startHealthWatch() {
         healthTimer?.invalidate()
-        healthTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkHealth() }
         }
-        healthTimer?.tolerance = 60
+        healthTimer?.tolerance = 120
     }
 
     private func checkHealth() {
-        guard store.value.healthAlerts, !needsOnboarding else { return }
-        for a in SystemMonitor.alertItems(SystemMonitor.shared.snapshot()) {
-            let key = a.kind.rawValue
-            if let last = lastAlerts[key], Date().timeIntervalSince(last) < 3600 { continue }
-            lastAlerts[key] = Date()
+        guard store.value.healthAlerts, !needsOnboarding else { extremeSince.removeAll(); return }
+        let now = Date()
+        let current = SystemMonitor.extremeItems(SystemMonitor.shared.snapshot())
+        let kinds = Set(current.map(\.kind))
+        extremeSince = extremeSince.filter { kinds.contains($0.key) }
+        for a in current {
+            let since = extremeSince[a.kind] ?? now
+            extremeSince[a.kind] = since
+            guard now.timeIntervalSince(since) >= SystemMonitor.patience(a.kind) else { continue }
+            if let last = lastAlerts[a.kind.rawValue], now.timeIntervalSince(last) < 3 * 3600 { continue }
+            lastAlerts[a.kind.rawValue] = now
             let kind: Notifier.Kind
             switch a.kind {
             case .battery, .batteryHealth: kind = .battery
@@ -902,11 +911,7 @@ final class AppModel: ObservableObject {
             case .memory: kind = .memory
             case .thermal: kind = .thermal
             }
-            overlayText = a.text
-            overlayVisible = store.value.overlayEnabled
-            if store.value.speakReplies { speaker.say(a.text, settings: store.value) }
             Notifier.shared.post(kind, title: "Your Mac", body: a.text)
-            refreshOverlay()
         }
     }
 
@@ -1096,20 +1101,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Every ten seconds while Jarvis is on screen: is the Mac itself working hard?
-    private func watchStrain() {
-        strainTimer?.invalidate()
-        strainTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.store.value.colorMode == "adaptive", self.windowVisible || self.quickActive else { return }
-                let snap = self.telemetry.snapshot ?? SystemMonitor.shared.snapshot()
-                let strained = snap.cpu > 0.85 || snap.thermal == "serious" || snap.thermal == "critical" || snap.pressure == "critical"
-                if strained != self.systemStrained { withAnimation(.easeInOut(duration: 1.2)) { self.systemStrained = strained } }
-            }
-        }
-        strainTimer?.tolerance = 2
-    }
-
     /// Learns which Gemini models this key can use (free; listing doesn't count against quota),
     /// so each tier has stand-ins when one model runs out of free requests.
     private func refreshModelList() {
@@ -1123,6 +1114,13 @@ final class AppModel: ObservableObject {
             if store.value.knownModels != models { store.value.knownModels = models }
             useNewestModels(from: models)
         }
+    }
+
+    /// When live readings are switched on, a Mac under strain also warms the colour. Nothing polls for this.
+    private func noteStrain(_ snap: MacSnapshot) {
+        guard store.value.colorMode == "adaptive" else { return }
+        let strained = snap.cpu > 0.85 || snap.thermal == "serious" || snap.thermal == "critical" || snap.pressure == "critical"
+        if strained != systemStrained { withAnimation(.easeInOut(duration: 1.2)) { systemStrained = strained } }
     }
 
     // MARK: Ollama

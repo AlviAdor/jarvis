@@ -40,7 +40,14 @@ public final class GeminiAgent: @unchecked Sendable {
 
     private func generate(mode: Mode, contents: [[String: Any]], tools: [[String: Any]], maxTokens: Int) async throws -> GeminiResponse {
         var last: Error = LLMError.badResponse
-        let usable = chain.filter { QuotaBook.shared.usable($0) }
+        var usable = chain.filter { QuotaBook.shared.usable($0) }
+        // If every model is only briefly busy (a per-minute limit), wait for the first to free up rather than give up.
+        if usable.isEmpty, let soonest = chain.compactMap({ QuotaBook.shared.reason($0) }).filter({ $0.kind == .perMinute }).map(\.until).min(),
+           soonest.timeIntervalSinceNow < 15 {
+            self.tools.report(ActionEvent(title: "Waiting a moment for Gemini", detail: "Free-tier limit per minute", state: .done, icon: "hourglass"))
+            try await Task.sleep(nanoseconds: UInt64(max(0.5, soonest.timeIntervalSinceNow + 0.5) * 1_000_000_000))
+            usable = chain.filter { QuotaBook.shared.usable($0) }
+        }
         if usable.isEmpty { throw LLMError.other(Friendly.allResting(chain)) }
         for model in usable {
             do {

@@ -74,15 +74,9 @@ public final class GeminiClient: @unchecked Sendable {
             let text = String(data: data, encoding: .utf8) ?? ""
 
             if code == 200 { return try Self.parse(data) }
-            // Quota: wait only as long as Google asks, once, and only for a short per-minute pause.
+            // Quota: note it and hand back at once, so the caller can move to another model without waiting.
             if code == 429 {
-                let r = QuotaBook.shared.note(model, body: text)
-                if r.kind == .perMinute, let wait = r.retryAfter, wait <= 12, attempts == 0 {
-                    attempts += 1
-                    try await Task.sleep(nanoseconds: UInt64((wait + 0.5) * 1_000_000_000))
-                    _ = QuotaBook.shared.usable(model, now: Date().addingTimeInterval(3600))   // lift the pause for this retry
-                    continue
-                }
+                QuotaBook.shared.note(model, body: text)
                 throw LLMError.http(code, text)
             }
 

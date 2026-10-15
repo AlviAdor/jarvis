@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0
+- Calmer orb: heavier work adds a gentle lift to the pace instead of a rush, particles swell softly rather than jump, every change eases over a few seconds, and it runs at 30 frames a second at rest for smoother motion
+- Voice match no longer locks you out: if there's too little audio to judge, the request goes through; the voiceprint keeps all your samples and compares against the closest ones, sets its threshold from how consistent your own voice is, and keeps learning from confident matches and push-to-talk requests
+- "It was me": when a request is turned away, one click teaches Jarvis that sample and runs the request
+- Quieter speech is heard: the mic level adapts to the room, recognition is told to expect "Jarvis" and your name, and near misses like "Jervis" or "Javis" still wake it
+- Say just "Jarvis" and it answers by name ("Yes, Alvi?"); it greets you when it starts; short phrases in the Gemini voice are kept so they play instantly
+- No routine checks on your Mac: only one light reading every ten minutes, and a quiet notification only when the Mac has been under extreme strain for a long stretch (memory or heat for 15 to 20 minutes, a nearly full disk, or a battery about to die); live readings for the colour come only from the optional live readings
+- Faster when Gemini is busy: a model at its per-minute limit is skipped at once instead of waited on
+
 ## 0.8.2
 - The particle sphere follows the workload: it spins up to about four and a half times faster as work gets heavier, particles jump off the surface in bursts that grow with the load, and the ring speeds up, all in step with the colour shift from cyan to red
 - The same applies when the Mac itself is under strain; everything settles back smoothly when Jarvis is done

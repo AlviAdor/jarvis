@@ -437,3 +437,45 @@ final class AlertKindTests: XCTestCase {
         XCTAssertEqual(SystemMonitor.alerts(s).count, 4)
     }
 }
+
+final class VoiceUpgradeTests: XCTestCase {
+    func testWakeWordNearMisses() {
+        for w in ["Jarvis", "jarvis,", "Jervis", "Javis", "Jarvas", "Garvis"] { XCTAssertTrue(VoiceEngine.isWake(w), w) }
+        for w in ["service", "jar", "travel", "harvest", "nervous"] { XCTAssertFalse(VoiceEngine.isWake(w), w) }
+    }
+
+    func testProfileLearnsAndKeepsUp() {
+        var rng = SystemRandomNumberGenerator()
+        let me = (0..<57).map { _ in Float.random(in: -1...1, using: &rng) }
+        func noisy(_ v: [Float], _ n: Float = 0.12) -> [Float] { v.map { $0 + Float.random(in: -n...n) } }
+        var p = VoiceProfile.enroll((0..<4).map { _ in noisy(me) })!
+        XCTAssertEqual(p.samples.count, 4)
+        for _ in 0..<50 { p.learn(noisy(me)) }
+        XCTAssertEqual(p.samples.count, VoiceProfile.maxSamples)
+        XCTAssertTrue(p.matches(noisy(me), strictness: 0.5))
+        XCTAssertFalse(p.matches((0..<57).map { _ in Float.random(in: -1...1, using: &rng) }, strictness: 0.5))
+    }
+
+    func testOldVoiceprintsStillLoad() throws {
+        let old = try JSONSerialization.data(withJSONObject: ["center": [0.1, 0.2], "floor": 0.8])
+        let p = try JSONDecoder().decode(VoiceProfile.self, from: old)
+        XCTAssertTrue(p.samples.isEmpty)
+        XCTAssertEqual(p.score([0.1, 0.2]), 1, accuracy: 0.001)
+    }
+
+    func testOnlyExtremeLongStrainIsReported() {
+        let calm = MacCareTests().snapshot(battery: 12)
+        XCTAssertTrue(SystemMonitor.extremeItems(calm).isEmpty)   // 12% battery is not an emergency
+        let bad = MacCareTests().snapshot(battery: 4, free: 1_000_000_000, pressure: "critical", thermal: "serious")
+        XCTAssertEqual(Set(SystemMonitor.extremeItems(bad).map(\.kind)), [.battery, .storage, .memory, .thermal])
+        XCTAssertGreaterThanOrEqual(SystemMonitor.patience(.memory), 15 * 60)
+        XCTAssertEqual(SystemMonitor.patience(.battery), 0)
+    }
+
+    func testOlderSettingsGetAGentlerMicLevel() throws {
+        let old = try JSONSerialization.data(withJSONObject: ["settingsVersion": 3, "micThreshold": 0.02])
+        let s = JarvisSettings.load(from: old)
+        XCTAssertEqual(s.micThreshold, 0.006)
+        XCTAssertTrue(s.answerWhenCalled)
+    }
+}

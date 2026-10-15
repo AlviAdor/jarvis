@@ -291,6 +291,34 @@ public final class SystemMonitor: @unchecked Sendable {
 
     public static func alerts(_ s: MacSnapshot) -> [String] { alertItems(s).map(\.text) }
 
+    /// Only the serious cases, for unprompted warnings: memory pressure at its worst, overheating,
+    /// a nearly full disk, or a battery about to die. Ordinary busy moments don't count.
+    public static func extremeItems(_ s: MacSnapshot) -> [Alert] {
+        var out: [Alert] = []
+        if s.pressure == "critical" {
+            out.append(Alert(kind: .memory, text: "Your Mac has been short of memory for a while, which slows everything down. Closing a few apps will help."))
+        }
+        if s.thermal == "serious" || s.thermal == "critical" {
+            out.append(Alert(kind: .thermal, text: "Your Mac has been running very hot for a while and is slowing itself down to cool off."))
+        }
+        if s.diskTotal > 0, s.diskFree < 2_000_000_000 || Double(s.diskFree) / Double(s.diskTotal) < 0.02 {
+            out.append(Alert(kind: .storage, text: "Your disk is almost full (\(bytes(s.diskFree)) left). Apps may stop saving. I can free some space."))
+        }
+        if let b = s.battery, !b.onAC, b.percent <= 5 {
+            out.append(Alert(kind: .battery, text: "Battery is at \(b.percent)%. Plug in now to avoid losing work."))
+        }
+        return out
+    }
+
+    /// How long a problem has to last before it's worth interrupting the user.
+    public static func patience(_ kind: Alert.Kind) -> TimeInterval {
+        switch kind {
+        case .memory, .storage: return 20 * 60
+        case .thermal: return 15 * 60
+        case .battery, .batteryHealth: return 0
+        }
+    }
+
     /// A plain report the model (or the user) can read.
     public static func report(_ s: MacSnapshot, top: (cpu: [ProcessUsage], memory: [ProcessUsage])? = nil, focus: String = "all") -> String {
         var lines: [String] = ["\(chip) \(model), \(macOS), up \(duration(s.uptime))."]
