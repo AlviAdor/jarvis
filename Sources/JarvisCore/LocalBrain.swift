@@ -217,6 +217,28 @@ public final class LocalBrain: @unchecked Sendable {
         }
     }
 
+    // MARK: One-shot
+
+    /// A single answer from the local model with custom instructions; nil when no local model is available.
+    public func complete(_ text: String, instructions: String, settings s: JarvisSettings) async -> String? {
+        guard let (engine, model) = await resolve(s) else { return nil }
+        let stream: AsyncThrowingStream<String, Error>
+        switch engine {
+        case .apple:
+            #if canImport(FoundationModels)
+            if #available(macOS 26.0, *) { stream = appleStream(text, instructions: instructions) } else { return nil }
+            #else
+            return nil
+            #endif
+        case .ollama:
+            stream = ollamaStream(model: model, messages: [["role": "system", "content": instructions], ["role": "user", "content": text]])
+        }
+        var last = ""
+        do { for try await part in stream { last = part } } catch { return last.isEmpty ? nil : last }
+        let out = Self.stripThinking(last).trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"")))
+        return out.isEmpty ? nil : out
+    }
+
     // MARK: Answering
 
     /// Streams the growing answer text. Returns nil when no local model is available.

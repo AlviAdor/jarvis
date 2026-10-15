@@ -565,7 +565,12 @@ final class MacControlTests: XCTestCase {
         XCTAssertEqual(Dev.command("test", in: dir), ["npm", "test", "--silent"])
         XCTAssertEqual(Dev.command("lint", in: dir)?.last, ".")
         XCTAssertNil(Dev.repo("/tmp"))
-        XCTAssertNotNil(Dev.repo(FileManager.default.currentDirectoryPath) ?? Dev.repo(#filePath))
+        // A project inside the home folder, found from one of its subfolders.
+        let home = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/JarvisRepoTest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent("Sources/App"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        XCTAssertEqual(Dev.repo(home.appendingPathComponent("Sources/App").path)?.lastPathComponent, home.lastPathComponent)
     }
 
     func testDatabaseChangesAreSpotted() {
@@ -618,5 +623,26 @@ final class MacControlTests: XCTestCase {
         XCTAssertEqual(ComputerUseAgent.pick(s), s.flashModel)
         s.effort = "max"
         XCTAssertEqual(ComputerUseAgent.pick(s), "gemini-4-argon")
+    }
+}
+
+
+final class AIAppTests: XCTestCase {
+    func testRequestsForOtherAssistantsAreRecognised() {
+        let r = AIApps.request(in: "Ask ChatGPT to make me a workout plan for gaining muscle")
+        XCTAssertEqual(r?.target.id, "chatgpt")
+        XCTAssertEqual(r?.ask, "make me a workout plan for gaining muscle")
+        XCTAssertEqual(AIApps.request(in: "tell claude about my essay on climate policy")?.target.id, "claude")
+        XCTAssertEqual(AIApps.request(in: "use grok to explain black holes simply")?.ask, "explain black holes simply")
+        XCTAssertEqual(AIApps.request(in: "open Gemini and ask it to summarise the news")?.target.id, "gemini")
+        XCTAssertEqual(AIApps.request(in: "type this into perplexity: best laptops under 1000 dollars")?.ask, "best laptops under 1000 dollars")
+        XCTAssertNil(AIApps.request(in: "what's the weather today"))
+        XCTAssertNil(AIApps.request(in: "ask chatgpt"))
+    }
+
+    func testAssistantsHaveSensiblePlaces() {
+        for t in AIApps.targets { XCTAssertTrue(t.web.hasPrefix("https://"), t.id) }
+        XCTAssertEqual(AIApps.target("Chat GPT")?.name, "ChatGPT")
+        XCTAssertEqual(AIApps.target("grock")?.id, "grok")
     }
 }

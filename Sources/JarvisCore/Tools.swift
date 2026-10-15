@@ -142,6 +142,12 @@ public final class ToolBox: @unchecked Sendable {
                 "app": ("STRING", "App name; default is the app in front"),
                 "window_action": ("STRING", "For window: minimize, close, zoom, fullscreen, hide or hide_others"),
             ], required: ["action"]))
+            d.append(Self.fn("ai_app", "Use another AI assistant the way the user would: open ChatGPT, Claude, Gemini, Grok, Perplexity or Copilot (the desktop app if installed, otherwise the website), type a prompt into its message box visibly, send it, and optionally read the reply.", [
+                "app": ("STRING", "chatgpt, claude, gemini, grok, perplexity or copilot"),
+                "prompt": ("STRING", "A clear, well-written prompt, as the user"),
+                "send": ("BOOLEAN", "Press send after typing (default true)"),
+                "read_reply": ("BOOLEAN", "Wait for the answer and return it"),
+            ], required: ["app", "prompt"]))
             d.append(Self.fn("run_applescript", "Run AppleScript to automate Mac apps (Finder, Safari, Music, Mail, Notes, System Events and more). The script is shown to the user; risky ones ask first.", [
                 "script": ("STRING", "AppleScript source"), "purpose": ("STRING", "One short sentence on what it does"),
             ], required: ["script", "purpose"]))
@@ -341,6 +347,7 @@ public final class ToolBox: @unchecked Sendable {
             default: return ("Looking at \(s("app").isEmpty ? "the app in front" : s("app"))", nil, nil, "list.bullet.rectangle")
             }
         case "run_applescript": return (s("purpose").isEmpty ? "Running AppleScript" : s("purpose"), s("script"), nil, "applescript")
+        case "ai_app": return ("Asking \(AIApps.target(s("app"))?.name ?? s("app"))", s("prompt"), nil, "bubble.left.and.text.bubble.right")
         case "browser":
             switch s("action") {
             case "open": return ("Opening \(URL(string: s("url"))?.host ?? "a link")", s("url"), nil, "safari")
@@ -479,6 +486,14 @@ public final class ToolBox: @unchecked Sendable {
             default:
                 return ToolResult(UIControl.list(app: app))
             }
+        case "ai_app":
+            guard let t = AIApps.target(str("app")) else { return ToolResult("Unknown assistant. Use chatgpt, claude, gemini, grok, perplexity or copilot.") }
+            let prompt = str("prompt")
+            let submit = (a["send"] as? Bool) ?? true
+            let sent = await AIApps.send(t, prompt: prompt, submit: submit)
+            guard submit, bool("read_reply"), sent.hasPrefix("Typed") else { return ToolResult(sent, screenshot: true) }
+            tainted = true
+            return ToolResult(sent + "\n\n\(t.name) replied:\n" + (await AIApps.readReply(after: prompt)))
         case "run_applescript":
             let script = str("script")
             let mode = settings.scriptConfirm
