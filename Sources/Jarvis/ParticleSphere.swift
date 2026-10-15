@@ -56,19 +56,19 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
         if (d.w >= 2.0) {
             float seed = d.w - 2.0;
             float a = d.x + u.ringAngle * (1.0 + 0.08 * sin(seed * 9.0));
-            float r = 1.36 + d.y + u.level * 0.06 * sin(u.time * 6.0 + seed * 20.0)
+            float r = 1.42 + d.y + u.level * 0.06 * sin(u.time * 6.0 + seed * 20.0)
                       + u.color.w * 0.03 * sin(u.time * 2.5 + seed * 25.0);
             float3 p = float3(cos(a) * r, d.z, sin(a) * r);
-            float rt = 1.18;
+            float rt = 0.36;
             p = float3(p.x, cos(rt) * p.y - sin(rt) * p.z, sin(rt) * p.y + cos(rt) * p.z);
-            float rz = -0.42;
+            float rz = -0.38;
             p = float3(cos(rz) * p.x - sin(rz) * p.y, sin(rz) * p.x + cos(rz) * p.y, p.z);
             float cam = 3.2;
             float s = cam / (cam - p.z);
             float2 xy = p.xy * s * 0.6;
             VOut o;
             o.pos = float4(xy.x / max(u.aspect, 0.01), xy.y, 0.0, 1.0);
-            o.front = clamp((p.z + 1.4) / 2.8, 0.0, 1.0);
+            o.front = clamp((p.z + 1.45) / 2.9, 0.0, 1.0);
             o.size = u.pointSize * s * (0.5 + 0.7 * o.front);
             o.ring = 1.0;
             return o;
