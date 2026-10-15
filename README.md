@@ -37,6 +37,11 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 **Effort and usage**
 - Effort from Low to Max controls thinking depth, model strength and answer length; the usage saver stretches the free Gemini allowance; when the cloud isn't available, the local model answers
 
+**Works your Mac and your work**
+- Operates apps through their real buttons, fields and menus, AppleScript, files and the browser, and Gemini's computer use for screen tasks
+- Git, tests, linting, API calls, SQLite, documents (proposals, contracts, reports), Mail drafts, RSS feeds, Spotify, audio devices and focus noise
+- Connectors for HubSpot, Notion, Airtable, Slack, GitHub and Postgres
+
 **Remembers you**
 - Keeps the conversation across restarts, so follow-ups like "and tomorrow?" just work
 - Gets to know you by talking during setup: it asks out loud, you answer, and it learns your voice from those answers. It keeps learning from what you mention, all stored on this Mac

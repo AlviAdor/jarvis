@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.11.0
+**Operating your Mac smartly**
+- Jarvis works apps through their real controls (Accessibility): it reads the front window's buttons, fields and menus, presses and fills them by name, chooses menu items like "File > Export as PDF…", switches apps and minimises, closes or hides windows, all without screenshots
+- AppleScript for almost any app, shown as it runs; scripts that delete, send, type keystrokes or run shell commands ask first (configurable)
+- Moves, copies, renames, zips and unzips your files and makes folders, inside your home folder and never overwriting
+- Knows the page you're on in Safari, Chrome, Arc, Edge or Brave, your open tabs, and can read the page for "summarise this"
+- Screen tasks use Gemini's built-in computer use (click, type, scroll, drag, keys on a 0-999 grid, with Gemini's own confirmations), falling back to the screenshot method
+- Requests to open, click, close or switch go to these controls first; only things that need eyes start with a screenshot
+
+**Work and developer tools**
+- Git status, log, branches and diffs, commits with messages written from the diff, pushes, GitHub pull request status, and running a project's tests, formatter or linter
+- An API client for any endpoint (including localhost), SQLite queries (changes ask first), and searching inside your code and documents
+- Proposals, contracts, NDAs, status updates, case studies and cover letters saved as Word, RTF or Markdown documents in Documents/Jarvis, and Mail drafts with attachments
+- RSS and Atom feeds for job boards, blogs and news; pair with automations for a daily job digest
+
+**Music and sound**
+- Spotify: what's playing, play a link, pause, skip, shuffle, repeat, volume and search
+- Switch speakers or microphone, and play white, pink or brown focus noise generated on the Mac
+
+**Connectors**
+- Ready-made MIT-licensed connectors for HubSpot, Notion, Airtable, Slack, GitHub and Postgres; access tokens are kept in the Keychain
+- One click installs Node.js (official LTS, checksum-verified, no admin rights) so connectors can run
+- Only the tool groups that matter for a request are sent, keeping requests small and quick
+
 ## 0.10.0
 - Any language: speech that isn't confident English goes to Gemini, which understands most languages, and Jarvis answers in the language you used; typed messages work the same way
 - Speaks each language properly: replies use a Mac voice for that language, or Gemini's multilingual voice when none is installed, with a one-click way to get the missing voice
