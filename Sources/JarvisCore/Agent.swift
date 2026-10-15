@@ -40,7 +40,9 @@ public final class GeminiAgent: @unchecked Sendable {
 
     private func generate(mode: Mode, contents: [[String: Any]], tools: [[String: Any]], maxTokens: Int) async throws -> GeminiResponse {
         var last: Error = LLMError.badResponse
-        for model in chain {
+        let usable = chain.filter { QuotaBook.shared.usable($0) }
+        if usable.isEmpty { throw LLMError.other(Friendly.allResting(chain)) }
+        for model in usable {
             do {
                 let r = try await client.generate(model: model, system: jarvisSystemPrompt(mode: mode, settings: settings, profile: profile),
                                                   contents: contents, tools: tools, maxTokens: maxTokens,
@@ -49,19 +51,27 @@ public final class GeminiAgent: @unchecked Sendable {
                 return r
             } catch LLMError.http(let code, let body) where [404, 429, 500, 503].contains(code) {
                 last = LLMError.http(code, body)
-                log("\(model) isn't responding, trying another model")
+                if code == 429 {
+                    let r = QuotaBook.parse(body)
+                    log("\(model): \(r.kind == .perDay ? "daily free limit reached" : r.kind == .noFreeTier ? "not in the free tier" : "rate limited"), trying another model")
+                    self.tools.report(ActionEvent(title: "Switching model", detail: "\(model) is out of free requests for now", state: .done, icon: "arrow.triangle.swap"))
+                } else {
+                    log("\(model) isn't responding, trying another model")
+                }
             }
         }
+        if case LLMError.http(429, _) = last { throw LLMError.other(Friendly.allResting(chain)) }
         throw last
     }
 
-    public func run(task: String, mode: Mode, history: [(role: String, text: String)]) async throws -> AgentOutcome {
+    public func run(task: String, mode: Mode, history: [(role: String, text: String)], attachments: [Attachment] = []) async throws -> AgentOutcome {
+        let attached = attachments.map(\.geminiPart)
         var contents: [[String: Any]] = history.map {
             ["role": $0.role == "assistant" ? "model" : "user", "parts": [["text": $0.text]]]
         }
 
         if mode == .web {
-            contents.append(["role": "user", "parts": [["text": task]]])
+            contents.append(["role": "user", "parts": [["text": task]] + attached])
             let id = UUID()
             tools.report(ActionEvent(id: id, title: "Searching the web", detail: task, state: .running))
             do {
@@ -82,7 +92,7 @@ public final class GeminiAgent: @unchecked Sendable {
 
         let screenMode = mode == .screen
         let screenSize = await MainActor.run { NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900) }
-        var userParts: [[String: Any]] = [["text": task]]
+        var userParts: [[String: Any]] = [["text": task]] + attached
         if screenMode {
             try Permissions.ensureAccessibility()
             let shot = try await Screen.capture()
@@ -224,7 +234,8 @@ func jarvisSystemPrompt(mode: Mode, settings: JarvisSettings, profile: String) -
     f.dateFormat = "EEEE, d MMMM yyyy, HH:mm"
     var s = """
     You are Jarvis, a capable, calm voice assistant running on the user's Mac (\(SystemMonitor.chip), \(SystemMonitor.macOS)). It is \(f.string(from: Date())).
-    Your replies are spoken aloud and also shown as a short card. Give only the answer or the result the user needs: no greetings, no restating the question, no markdown, no lists unless asked. \(answerLength(settings.answerStyle))
+    Your replies are spoken aloud and also shown as a short card. Give only the answer or the result the user needs: no greetings, no restating the question. Write plain sentences; use markdown only for code (in fenced blocks), tables or lists the user asks for. \(answerLength(settings.answerStyle))
+    When the user attaches files, images, PDFs, audio or video, read them carefully and answer about them directly.
     The conversation so far is included: treat short follow-ups ("and tomorrow?", "send it to her", "do the same for Desktop") as continuing it.
     You can act, not just talk: use tools for the user's apps, files, calendar, reminders, notes, messages, mail, music, settings, the Mac's health and disk space, the web, and the screen. Chain several tools when a job needs it, and finish the job rather than describing how the user could do it.
     The user watches every action you take, so act directly and don't narrate what the screen already shows.

@@ -52,12 +52,12 @@ public final class ClaudeAgent: @unchecked Sendable {
         self.log = log
     }
 
-    public func run(task: String, mode: Mode, history: [(role: String, text: String)]) async throws -> AgentOutcome {
+    public func run(task: String, mode: Mode, history: [(role: String, text: String)], attachments: [Attachment] = []) async throws -> AgentOutcome {
         var messages: [[String: Any]] = history.map { ["role": $0.role, "content": [["type": "text", "text": $0.text]]] }
         let screenMode = mode == .screen
         let screenSize = await MainActor.run { NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900) }
 
-        var first: [[String: Any]] = [["type": "text", "text": task]]
+        var first: [[String: Any]] = [["type": "text", "text": task]] + attachments.map(\.claudeBlock)
         if screenMode {
             try Permissions.ensureAccessibility()
             let shot = try await Screen.capture()

@@ -1,4 +1,6 @@
 import XCTest
+import AppKit
+import ImageIO
 @testable import JarvisCore
 
 final class RoutingTests: XCTestCase {
@@ -310,5 +312,96 @@ final class InterviewTests: XCTestCase {
         XCTAssertEqual(p.style, "brief")
         XCTAssertEqual(p.facts, ["User plays football on Fridays."])
         XCTAssertNil(Interview.parseProfile("Sorry, I can't help with that."))
+    }
+}
+
+final class QuotaTests: XCTestCase {
+    func testRefusalsAreUnderstood() {
+        let perDay = #"{"error":{"code":429,"message":"You exceeded your current quota. Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.8-flash","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"41s"}]}}"#
+        XCTAssertEqual(QuotaBook.parse(perDay).kind, .perDay)
+        let perMinute = #"{"error":{"code":429,"message":"Quota exceeded","details":[{"violations":[{"quotaId":"GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"7s"}]}}"#
+        let m = QuotaBook.parse(perMinute)
+        XCTAssertEqual(m.kind, .perMinute)
+        XCTAssertEqual(m.retryAfter, 7)
+        let none = #"{"error":{"code":429,"message":"Quota exceeded for metric: generate_content_free_tier_requests, limit: 0, model: gemini-3.1-pro"}}"#
+        XCTAssertEqual(QuotaBook.parse(none).kind, .noFreeTier)
+    }
+
+    func testRestingModelsAreSkippedUntilTheyReset() {
+        let book = QuotaBook()
+        let model = "gemini-test-\(UUID().uuidString)"
+        let now = Date()
+        book.note(model, body: #"{"error":{"details":[{"violations":[{"quotaId":"PerMinute"}]},{"retryDelay":"5s"}]}}"#, now: now)
+        XCTAssertFalse(book.usable(model, now: now.addingTimeInterval(2)))
+        XCTAssertTrue(book.usable(model, now: now.addingTimeInterval(30)))
+        XCTAssertGreaterThan(QuotaBook.nextPacificMidnight(after: now), now)
+    }
+
+    func testEachTierHasStandIns() {
+        let models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview"]
+        XCTAssertEqual(ModelPicker.ranked(.flash, in: models), ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3-flash-preview"])
+        var s = JarvisSettings()
+        s.knownModels = models
+        let chain = Router().chain(for: .web, settings: s)
+        XCTAssertEqual(chain.first, s.flashModel)
+        XCTAssertTrue(chain.contains("gemini-3.6-flash"))
+        XCTAssertTrue(chain.contains("gemini-3.1-flash-lite"))
+        XCTAssertEqual(Set(chain).count, chain.count)
+    }
+}
+
+final class AttachmentTests: XCTestCase {
+    var dir: URL!
+
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-attach-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    override func tearDown() { try? FileManager.default.removeItem(at: dir) }
+
+    func testCodeAndTextBecomeText() throws {
+        let u = dir.appendingPathComponent("main.swift")
+        try "print(\"hi\")".write(to: u, atomically: true, encoding: .utf8)
+        let a = try Attachment.load(u)
+        XCTAssertEqual(a.kind, .text)
+        XCTAssertTrue((a.geminiPart["text"] as? String)?.contains("print") == true)
+        XCTAssertEqual(a.claudeBlock["type"] as? String, "text")
+    }
+
+    func testImagesBecomeJPEGWithAThumbnail() throws {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 3000, pixelsHigh: 1500, bitsPerSample: 8, samplesPerPixel: 4,
+                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let u = dir.appendingPathComponent("photo.png")
+        try rep.representation(using: .png, properties: [:])!.write(to: u)
+        let a = try Attachment.load(u)
+        XCTAssertEqual(a.kind, .image)
+        XCTAssertEqual(a.mime, "image/jpeg")
+        XCTAssertNotNil(a.thumbnail)
+        let src = CGImageSourceCreateWithData(a.data as CFData, nil)!
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as! [CFString: Any]
+        XCTAssertEqual(props[kCGImagePropertyPixelWidth] as? Int, 2048)
+        XCTAssertEqual(((a.claudeBlock["source"] as? [String: Any])?["media_type"]) as? String, "image/jpeg")
+    }
+
+    func testPDFsAndAudioGoInline() throws {
+        let pdf = dir.appendingPathComponent("doc.pdf")
+        try Data("%PDF-1.4 test".utf8).write(to: pdf)
+        let a = try Attachment.load(pdf)
+        XCTAssertEqual(a.kind, .pdf)
+        XCTAssertEqual(((a.geminiPart["inline_data"] as? [String: Any])?["mime_type"]) as? String, "application/pdf")
+        XCTAssertEqual(a.claudeBlock["type"] as? String, "document")
+        let mp3 = dir.appendingPathComponent("memo.mp3")
+        try Data(repeating: 1, count: 100).write(to: mp3)
+        XCTAssertTrue(try Attachment.load(mp3).needsGemini)
+    }
+
+    func testUnsupportedAndOversizedAreRefused() throws {
+        let bin = dir.appendingPathComponent("tool.dylib")
+        try Data(repeating: 0, count: 10).write(to: bin)
+        XCTAssertThrowsError(try Attachment.load(bin))
+        let big = dir.appendingPathComponent("huge.pdf")
+        try Data(repeating: 0, count: Attachment.maxInline + 1).write(to: big)
+        XCTAssertThrowsError(try Attachment.load(big))
     }
 }
