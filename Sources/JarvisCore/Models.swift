@@ -1,21 +1,5 @@
 import Foundation
 
-public enum Provider: String, Codable, Sendable {
-    case anthropic, google
-}
-
-public struct ModelSpec: Identifiable, Hashable, Sendable {
-    public let id: String
-    public let name: String
-    public let provider: Provider
-    public let inputPerMTok: Double
-    public let outputPerMTok: Double
-
-    public func cost(_ u: Usage) -> Double {
-        Double(u.input) / 1_000_000 * inputPerMTok + Double(u.output) / 1_000_000 * outputPerMTok
-    }
-}
-
 public struct Usage: Sendable {
     public var input = 0
     public var output = 0
@@ -25,24 +9,81 @@ public struct Usage: Sendable {
     }
 }
 
-public enum Catalog {
-    public static let haiku = ModelSpec(id: "claude-haiku-5-5", name: "Haiku 5.5", provider: .anthropic, inputPerMTok: 0.10, outputPerMTok: 0.50)
-    public static let sonnet = ModelSpec(id: "claude-sonnet-5-5", name: "Sonnet 5.5", provider: .anthropic, inputPerMTok: 2, outputPerMTok: 10)
-    public static let opus = ModelSpec(id: "claude-opus-5-5", name: "Opus 5.5", provider: .anthropic, inputPerMTok: 4, outputPerMTok: 20)
+public enum Tier: String, CaseIterable, Codable, Sendable {
+    case lite, flash, pro
 
-    // Gemini ids are editable in settings; the free tier is treated as zero cost.
-    public static func geminiFast(_ s: JarvisSettings) -> ModelSpec {
-        ModelSpec(id: s.geminiFastModel, name: "Gemini Fast", provider: .google, inputPerMTok: 0, outputPerMTok: 0)
+    public var fallback: Tier? {
+        switch self {
+        case .lite: return nil
+        case .flash: return .lite
+        case .pro: return .flash
+        }
     }
-    public static func geminiPro(_ s: JarvisSettings) -> ModelSpec {
-        ModelSpec(id: s.geminiProModel, name: "Gemini Pro", provider: .google, inputPerMTok: 0, outputPerMTok: 0)
+}
+
+public enum Mode: String, Sendable {
+    case chat, web, screen, hard
+}
+
+public enum LLMError: Error, LocalizedError {
+    case missingKey
+    case http(Int, String)
+    case refused(String)
+    case badResponse
+    case other(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingKey: return "No Gemini API key is set."
+        case .http(let code, let body): return "Gemini request failed (\(code)): \(body.prefix(300))"
+        case .refused(let why): return "Gemini declined this request. \(why)"
+        case .badResponse: return "Unexpected response from Gemini."
+        case .other(let s): return s
+        }
+    }
+}
+
+public struct AgentOutcome: Sendable {
+    public let success: Bool
+    public let summary: String
+    public init(success: Bool, summary: String) {
+        self.success = success
+        self.summary = summary
+    }
+}
+
+/// Counts requests and tokens per day so the free tier's limits stay visible.
+@MainActor
+public final class UsageTracker: ObservableObject {
+    @Published public private(set) var requests = 0
+    @Published public private(set) var tokens = 0
+
+    private var day = ""
+
+    public init() { load() }
+
+    private static func today() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
     }
 
-    public static func all(_ s: JarvisSettings) -> [ModelSpec] {
-        [geminiFast(s), geminiPro(s), haiku, sonnet, opus]
+    private func load() {
+        day = Self.today()
+        requests = UserDefaults.standard.integer(forKey: "jarvis.req." + day)
+        tokens = UserDefaults.standard.integer(forKey: "jarvis.tok." + day)
     }
 
-    public static func spec(id: String, _ s: JarvisSettings) -> ModelSpec? {
-        all(s).first { $0.id == id }
+    public func add(_ u: Usage) {
+        if day != Self.today() { load() }
+        requests += 1
+        tokens += u.input + u.output
+        UserDefaults.standard.set(requests, forKey: "jarvis.req." + day)
+        UserDefaults.standard.set(tokens, forKey: "jarvis.tok." + day)
+    }
+
+    public func overCap(_ cap: Int) -> Bool {
+        if day != Self.today() { load() }
+        return requests >= cap
     }
 }

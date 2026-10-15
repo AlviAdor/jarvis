@@ -15,7 +15,22 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>15.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>app.jarvis</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>jarvis</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Jarvis reads and sends mail on your behalf when you ask.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jarvis listens to your voice to take requests.</string>
     <key>NSSpeechRecognitionUsageDescription</key>

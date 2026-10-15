@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ApplicationServices
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -12,6 +13,10 @@ public struct Shot: Sendable {
 public enum Screen {
     /// Captures the main display, downscaled so each step stays cheap in tokens.
     public static func capture(maxDim: Int = 1280) throws -> Shot {
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            throw LLMError.other("Jarvis needs Screen Recording permission. Enable it in System Settings, Privacy and Security, then try again.")
+        }
         let path = NSTemporaryDirectory() + "jarvis-\(UUID().uuidString).png"
         defer { try? FileManager.default.removeItem(atPath: path) }
 
@@ -37,6 +42,16 @@ public enum Screen {
         CGImageDestinationAddImage(dest, img, [kCGImageDestinationLossyCompressionQuality: 0.6] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw LLMError.badResponse }
         return Shot(jpeg: out as Data, width: img.width, height: img.height)
+    }
+}
+
+public enum Permissions {
+    /// Prompts once if Accessibility (needed to move the mouse and type) hasn't been granted.
+    public static func ensureAccessibility() throws {
+        let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        guard AXIsProcessTrustedWithOptions(opts) else {
+            throw LLMError.other("Jarvis needs Accessibility permission to control the mouse and keyboard. Enable it in System Settings, Privacy and Security, then try again.")
+        }
     }
 }
 
