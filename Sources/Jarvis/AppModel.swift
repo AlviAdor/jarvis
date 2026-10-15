@@ -1021,14 +1021,19 @@ final class AppModel: ObservableObject {
     func setUpOllama() async {
         ollamaBusy = "Starting Ollama…"
         if !LocalBrain.ollamaInstalled {
-            guard FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew") || FileManager.default.fileExists(atPath: "/usr/local/bin/brew") else {
-                ollamaBusy = nil
-                NSWorkspace.shared.open(URL(string: "https://ollama.com/download/mac")!)
+            ollamaBusy = "Downloading Ollama (about 200 MB)…"
+            pullProgress = 0
+            do {
+                try await LocalBrain.shared.installOllamaApp { [weak self] p in
+                    Task { @MainActor in self?.pullProgress = p }
+                }
+            } catch {
+                pullProgress = nil
+                ollamaBusy = Friendly.message(error)
                 return
             }
-            ollamaBusy = "Installing Ollama with Homebrew… this takes a minute or two"
-            let brew = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew") ? "/opt/homebrew/bin/brew" : "/usr/local/bin/brew"
-            _ = await Run.capture(brew, ["install", "ollama"], timeout: 3600)
+            pullProgress = nil
+            ollamaBusy = "Starting Ollama…"
         }
         let up = await LocalBrain.shared.startOllama()
         ollamaModels = await LocalBrain.shared.ollamaModels(fresh: true)

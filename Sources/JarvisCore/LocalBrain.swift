@@ -6,6 +6,19 @@ import FoundationModels
 /// Answers small requests on this Mac so they cost nothing and come back fast.
 /// Uses Apple's on-device model when Apple Intelligence is on, or a model served by Ollama.
 /// The model hands anything it shouldn't answer itself back to Gemini with an ESCALATE word.
+/// Reports a download's progress from 0 to 1.
+final class DownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let report: @Sendable (Double) -> Void
+    init(_ report: @escaping @Sendable (Double) -> Void) { self.report = report }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if totalBytesExpectedToWrite > 0 { report(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)) }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
+}
+
 public final class LocalBrain: @unchecked Sendable {
     public static let shared = LocalBrain()
 
@@ -98,6 +111,34 @@ public final class LocalBrain: @unchecked Sendable {
 
     public static var ollamaInstalled: Bool {
         ["/Applications/Ollama.app", "/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"].contains { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Installs the official Ollama app (native to Apple silicon) into /Applications, after checking it's
+    /// signed and notarised by Ollama. Homebrew isn't used: an Intel Homebrew would build a slow Rosetta copy.
+    /// Ollama's Apple Developer team (its company is Infra Technologies, Inc).
+    static let ollamaTeam = "3MU9H2V9Y9"
+
+    public func installOllamaApp(progress: @escaping @Sendable (Double) -> Void) async throws {
+        let source = URL(string: "https://ollama.com/download/Ollama-darwin.zip")!
+        let reporter = DownloadProgress(progress)
+        let (tmp, resp) = try await URLSession.shared.download(from: source, delegate: reporter)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw LLMError.other("Ollama's download didn't start. Try again in a moment.") }
+        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("jarvis-ollama-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: staging) }
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        _ = await Run.capture("/usr/bin/ditto", ["-x", "-k", tmp.path, staging.path], timeout: 300)
+        let app = staging.appendingPathComponent("Ollama.app")
+        guard FileManager.default.fileExists(atPath: app.path) else { throw LLMError.other("The Ollama download was incomplete.") }
+        // Only keep it if it's genuinely Ollama's, signed with their Developer ID and notarised by Apple.
+        let sig = await Run.capture("/usr/bin/codesign", ["-dv", "--verbose=2", app.path])
+        let gate = await Run.capture("/usr/sbin/spctl", ["-a", "-t", "exec", "-vv", app.path])
+        guard sig.contains("TeamIdentifier=\(Self.ollamaTeam)"), gate.contains("accepted"), gate.contains("Notarized Developer ID") else {
+            throw LLMError.other("The downloaded Ollama app didn't pass the signature check, so it wasn't installed.")
+        }
+        let dest = URL(fileURLWithPath: "/Applications/Ollama.app")
+        if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
+        try FileManager.default.moveItem(at: app, to: dest)
     }
 
     /// Starts Ollama in the background if it's installed but not running.

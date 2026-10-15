@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+- Talk over Jarvis to stop it: it listens while speaking, learns how its own voice sounds in the mic, and stops as soon as you speak; what you say becomes the next request (mid-task, it only goes quiet)
+- More time to finish a sentence: the default pause is longer, and Jarvis waits longer again when a sentence trails off ("…and", "because…")
+- Installing Ollama now downloads the official app (native to Apple silicon) and checks it's signed and notarised by Ollama's developer before installing; Homebrew isn't used
+
 ## 0.7.0
 - Attachments: add images, PDFs, documents, code, audio and short videos with the + menu, by dragging them onto the window, or by pasting an image with ⌘V; a screenshot of the screen can be attached too
 - Composer like other AI apps: Search, Think and Screen switches, a model picker, and send, talk or stop in one button
