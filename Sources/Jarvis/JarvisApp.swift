@@ -1,20 +1,43 @@
 import SwiftUI
 import AppKit
+import JarvisCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlay: OverlayController?
+    private var highlighter: HighlightController?
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu bar app: no Dock icon, runs quietly in the background.
-        NSApp.setActivationPolicy(.accessory)
-        overlay = OverlayController(model: AppModel.shared)
-        AppModel.shared.start()
+        let model = AppModel.shared
+        NSApp.setActivationPolicy(model.store.value.showInDock ? .regular : .accessory)
+        overlay = OverlayController(model: model)
+        highlighter = HighlightController(model: model)
+        model.start()
+        if !model.needsOnboarding && !model.store.value.openWindowAtLaunch {
+            DispatchQueue.main.async {
+                NSApp.windows.filter { $0.identifier?.rawValue.contains("hud") == true }.forEach { $0.close() }
+            }
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Clicking the Dock icon brings the window back.
+    @MainActor
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { AppModel.shared.showWindow() }
+        return true
     }
 
     @MainActor
     func application(_ application: NSApplication, open urls: [URL]) {
         urls.forEach { AppModel.shared.handle(url: $0) }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MCPHub.shared.stopAll()
     }
 }
 
@@ -26,12 +49,13 @@ struct JarvisApp: App {
 
     var body: some Scene {
         Window("Jarvis", id: "hud") {
-            HUDView()
+            RootView()
                 .environmentObject(model)
-                .frame(minWidth: 520, minHeight: 640)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultLaunchBehavior(.suppressed)
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 600, height: 800)
+        .windowBackgroundDragBehavior(.enabled)
 
         Settings {
             SettingsView()
@@ -39,8 +63,11 @@ struct JarvisApp: App {
         }
 
         MenuBarExtra {
-            Button("Show Jarvis") { openWindow(id: "hud"); NSApp.activate(ignoringOtherApps: true) }
-            Button("Talk now") { model.pushToTalk() }
+            Button("Show Jarvis") { model.showWindow() }
+            Button("Ask Jarvis…") { model.hotkeyPressed() }
+                .disabled(model.needsOnboarding)
+            Button("How's my Mac?") { model.submit("How's my Mac doing?") }
+                .disabled(model.needsOnboarding)
             Button("Stop everything") { model.stopEverything() }
             Divider()
             SettingsLink { Text("Settings…") }

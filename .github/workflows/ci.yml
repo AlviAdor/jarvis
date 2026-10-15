@@ -5,9 +5,13 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No secrets in the repo or its history
+        run: ./scripts/check_secrets.sh && ./scripts/check_secrets.sh --history
       - name: Build
         run: swift build
       - name: Test

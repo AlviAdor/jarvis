@@ -2,7 +2,13 @@ import Foundation
 import CoreGraphics
 
 public enum Input {
-    private static func post(_ e: CGEvent?) { e?.post(tap: .cghidEventTap) }
+    /// Stamped on every event Jarvis posts, so its own Esc presses don't trip the kill switch.
+    public static let marker: Int64 = 0x4A52_5653
+
+    private static func post(_ e: CGEvent?) {
+        e?.setIntegerValueField(.eventSourceUserData, value: marker)
+        e?.post(tap: .cghidEventTap)
+    }
 
     /// Moves the real cursor along an eased path so the motion is visible.
     public static func move(to p: CGPoint, duration: Double = 0.35) async {

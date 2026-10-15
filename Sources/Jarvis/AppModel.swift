@@ -6,7 +6,30 @@ import UserNotifications
 import JarvisCore
 
 enum Phase: String {
-    case idle, listening, thinking, acting
+    case idle, listening, thinking, acting, speaking
+}
+
+struct Step: Identifiable, Equatable {
+    let id: UUID
+    var title: String
+    var detail: String?
+    var state: ActionEvent.State
+    var icon: String?
+}
+
+struct Highlight: Equatable {
+    let id = UUID()
+    let point: CGPoint
+    let title: String
+}
+
+/// One question and its answer, kept for this session only.
+struct Exchange: Identifiable, Equatable {
+    let id = UUID()
+    let question: String
+    let answer: String
+    let source: String
+    let at: Date
 }
 
 @MainActor
@@ -17,56 +40,115 @@ final class AppModel: ObservableObject {
     let usage = UsageTracker()
     let voice = VoiceEngine()
     let memory = MemoryStore()
+    let speaker = Speaker()
+    let telemetry = Telemetry()
     private lazy var scheduler = Scheduler(memory: memory)
-    private let speaker = Speaker()
     private let router = Router()
+    private let hotKey = HotKey()
 
+    // What the user sees: the question, the answer, and the steps taken. Nothing else.
     @Published var phase: Phase = .idle { didSet { refreshOverlay() } }
-    @Published var feed: [String] = []
+    @Published var question = ""
+    @Published var answer = ""
+    @Published var answerSource = ""
+    @Published var steps: [Step] = []
+    @Published var history: [Exchange] = []
+    @Published var notice: String?
     @Published var typed = ""
+    @Published var highlight: Highlight?
     @Published var overlayVisible = false
     @Published var overlayText = ""
+    /// The floating ask bar is open for typing (opened with the shortcut).
+    @Published var quickActive = false
+    @Published var diagnostics: [String] = []
+    /// False while the main window is hidden or covered, so its animations and telemetry stop.
+    @Published var windowVisible = true { didSet { telemetry.setActive(wantsTelemetry) } }
+
+    // Setup and settings
+    @Published var termsAccepted: Bool
+    @Published var onboarded: Bool
     @Published var availableModels: [String] = []
+    @Published var ollamaModels: [String] = []
     @Published var facts: [String] = []
     @Published var automations: [Automation] = []
+    @Published var geminiTest: [TestLine] = []
+    @Published var claudeTest: [TestLine] = []
+    @Published var localTest: [TestLine] = []
+    @Published var testing = false
+    @Published var voices: [VoiceOption] = []
+    @Published var permissions: [PermissionItem] = []
 
-    private var history: [(role: String, text: String)] = []
+    var openMainWindow: (() -> Void)?
+    private var chat: [(role: String, text: String)] = []
     private var job: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
+    private var noticeTask: Task<Void, Never>?
+    private var highlightTask: Task<Void, Never>?
+    private var healthTimer: Timer?
+    private var lastAlerts: [String: Date] = [:]
     private var monitors: [Any] = []
     private var bag = Set<AnyCancellable>()
     private var started = false
+    private var dockShown: Bool?
     private var claudeBlockedUntil = Date.distantPast
+    private var hudWasVisible = false
 
+    var needsOnboarding: Bool { !termsAccepted || !onboarded }
+    var still: Bool { store.value.reduceMotion || !windowVisible }
+    var busy: Bool { phase == .thinking || phase == .acting }
     private var bundled: Bool { Bundle.main.bundleURL.pathExtension == "app" }
-
-    var accent: Color {
-        switch store.value.accent {
-        case "purple": return .purple
-        case "green": return .green
-        case "orange": return .orange
-        default: return .cyan
+    private var wantsTelemetry: Bool { store.value.showTelemetry && (windowVisible || quickActive) && !needsOnboarding }
+    var accent: Color { Color(hex: store.value.accentHex) }
+    var colorScheme: ColorScheme? {
+        switch store.value.theme {
+        case "light": return .light
+        case "system": return nil
+        default: return .dark
         }
     }
 
     private init() {
-        // Forward nested changes so views reading store/usage refresh.
+        termsAccepted = UserDefaults.standard.string(forKey: "jarvis.terms.version") == Terms.version
+        onboarded = UserDefaults.standard.bool(forKey: "jarvis.onboarded")
+
         store.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         usage.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         voice.$armed.sink { [weak self] armed in
             guard let self else { return }
-            if armed, self.phase == .idle { self.phase = .listening }
+            if armed, self.phase == .idle || self.phase == .speaking {
+                self.phase = .listening
+                NSSound(named: "Tink")?.play()
+            }
             if !armed, self.phase == .listening { self.phase = .idle }
         }.store(in: &bag)
         voice.$partial.sink { [weak self] p in if !p.isEmpty { self?.overlayText = p } }.store(in: &bag)
-        store.$value.sink { [weak self] _ in self?.applySettings() }.store(in: &bag)
+        store.$value.dropFirst().sink { [weak self] _ in Task { @MainActor in self?.applySettings() } }.store(in: &bag)
+        $quickActive.dropFirst().sink { [weak self] _ in
+            Task { @MainActor in guard let self else { return }; self.telemetry.setActive(self.wantsTelemetry) }
+        }.store(in: &bag)
 
         voice.onCommand = { [weak self] text in self?.submit(text) }
-        speaker.onSpeakingChange = { [weak self] speaking in self?.voice.suspended = speaking }
-        scheduler.onFire = { [weak self] auto in
-            self?.log("Scheduled: \(auto.prompt)")
-            self?.submit(auto.prompt)
+        // Warm the on-device model only once the speech is for Jarvis, not for every sound in the room.
+        voice.onWakeHeard = { [weak self] in
+            guard let self else { return }
+            LocalBrain.shared.prewarm(self.store.value)
         }
+        voice.onRejected = { [weak self] in self?.flash("That didn't sound like you, so I ignored it.") }
+        voice.onEnrolled = { [weak self] ok in
+            guard let self else { return }
+            let msg = ok ? "Got it. I'll recognise your voice now." : "I couldn't learn your voice. Please try again somewhere quiet."
+            self.flash(msg)
+            self.speaker.say(msg, settings: self.store.value)
+        }
+        speaker.geminiKey = { [weak self] in self?.store.geminiKey ?? "" }
+        speaker.onSpeakingChange = { [weak self] speaking in
+            guard let self else { return }
+            self.voice.suspended = speaking
+            if speaking, self.phase == .idle { self.phase = .speaking }
+            if !speaking, self.phase == .speaking { self.phase = .idle }
+        }
+        speaker.onFallback = { [weak self] why in self?.log("Gemini voice unavailable, used the Mac voice: \(why)") }
+        scheduler.onFire = { [weak self] auto in self?.submit(auto.prompt) }
         memory.onChange = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -77,19 +159,31 @@ final class AppModel: ObservableObject {
         }
         facts = memory.facts
         automations = memory.automations
+        HotKey.action = { [weak self] in self?.hotkeyPressed() }
     }
 
-    /// Called once at launch: starts listening, scheduling and the Esc kill switch.
+    // MARK: Lifecycle
+
+    /// Called once at launch.
     func start() {
         guard !started else { return }
         started = true
         installKillSwitch()
         scheduler.reschedule()
-        if bundled { UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in } }
+        if bundled, !needsOnboarding { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
         applySettings()
+        voices = VoiceCatalog.all()
+        refreshPermissions()
+        Task { ollamaModels = await LocalBrain.shared.ollamaModels(fresh: true) }
+        if !needsOnboarding { startListening() }
+        telemetry.setActive(wantsTelemetry)
+        startHealthWatch()
+    }
+
+    func startListening() {
         Task {
             guard await VoiceEngine.authorize() else {
-                log("Microphone or speech permission is off. Enable both in System Settings, Privacy and Security.")
+                log("Microphone or speech permission is off.")
                 return
             }
             do { try voice.start() } catch { log("Couldn't start the microphone: \(error.localizedDescription)") }
@@ -101,6 +195,16 @@ final class AppModel: ObservableObject {
         voice.wakeEnabled = s.wakeWordEnabled
         voice.wakeWord = s.wakeWord
         voice.threshold = Float(s.micThreshold)
+        voice.pause = s.responsePause
+        voice.lockEnabled = s.voiceLockEnabled
+        voice.lockStrictness = s.voiceLockStrictness
+        hotKey.set(s.hotkey)
+        guard started else { return }
+        telemetry.setActive(wantsTelemetry)
+        if dockShown != s.showInDock {
+            dockShown = s.showInDock
+            NSApp.setActivationPolicy(s.showInDock ? .regular : .accessory)
+        }
         if bundled {
             let svc = SMAppService.mainApp
             if s.launchAtLogin, svc.status != .enabled { try? svc.register() }
@@ -108,13 +212,77 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Onboarding
+
+    func acceptTerms() {
+        UserDefaults.standard.set(Terms.version, forKey: "jarvis.terms.version")
+        UserDefaults.standard.set(ISO8601DateFormatter().string(from: Date()), forKey: "jarvis.terms.date")
+        termsAccepted = true
+    }
+
+    var termsAcceptedOn: String {
+        guard let s = UserDefaults.standard.string(forKey: "jarvis.terms.date"),
+              let d = ISO8601DateFormatter().date(from: s) else { return "not yet" }
+        return d.formatted(date: .long, time: .shortened)
+    }
+
+    func finishOnboarding() {
+        UserDefaults.standard.set(true, forKey: "jarvis.onboarded")
+        onboarded = true
+        if bundled { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
+        startListening()
+        telemetry.setActive(wantsTelemetry)
+        let hello = store.value.userName.isEmpty ? "Hello. I'm ready when you are." : "Hello \(store.value.userName). I'm ready when you are."
+        reply(hello)
+    }
+
+    func replayOnboarding() {
+        onboarded = false
+        showWindow()
+    }
+
+    func refreshPermissions() { permissions = Permissions.status() }
+
+    /// Clears stale permission records and relaunches, so macOS asks once, cleanly.
+    func repairPermissions() {
+        Task {
+            _ = await Permissions.reset()
+            let path = Bundle.main.bundlePath
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", path]
+            try? p.run()
+            NSApp.terminate(nil)
+        }
+    }
+
     // MARK: Input
 
+    /// The global shortcut: open the floating ask bar and start listening.
+    func hotkeyPressed() {
+        guard !needsOnboarding else { showWindow(); return }
+        let hudKey = NSApp.windows.contains { $0.identifier?.rawValue.contains("hud") == true && $0.isKeyWindow }
+        if store.value.quickPanel, !hudKey {
+            if quickActive, phase == .listening { closeQuick(); return }
+            quickActive = true
+            overlayVisible = true
+        }
+        pushToTalk()
+    }
+
+    func closeQuick() {
+        quickActive = false
+        if phase == .listening { voice.disarm() }
+        refreshOverlay()
+    }
+
     func pushToTalk() {
+        guard !needsOnboarding else { showWindow(); return }
         speaker.stop()
         voice.suspended = false
-        voice.arm()
-        if !voice.running { start() }
+        voice.arm(push: true)
+        LocalBrain.shared.prewarm(store.value)
+        if !voice.running { startListening() }
     }
 
     func stopEverything() {
@@ -122,6 +290,8 @@ final class AppModel: ObservableObject {
         job?.cancel()
         speaker.stop()
         voice.disarm()
+        highlight = nil
+        steps = steps.map { var s = $0; if s.state == .running { s.state = .failed }; return s }
         phase = .idle
     }
 
@@ -133,39 +303,83 @@ final class AppModel: ObservableObject {
         job = Task { await handle(t) }
     }
 
-    /// jarvis://ask?q=... lets Shortcuts and Siri hand Jarvis a request.
+    /// jarvis://ask?q=... and jarvis://listen let Shortcuts and Siri hand Jarvis a request.
     func handle(url: URL) {
         switch url.host {
         case "ask":
             let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value
             if let q { submit(q) } else { pushToTalk() }
         case "listen":
-            pushToTalk()
+            hotkeyPressed()
         default:
-            break
+            showWindow()
         }
     }
 
-    func refreshModels() {
-        guard !store.geminiKey.isEmpty else { return }
-        let client = GeminiClient(apiKey: store.geminiKey)
-        Task {
-            do { availableModels = try await client.listModels() }
-            catch { log("Couldn't list models: \(error.localizedDescription)") }
-        }
+    func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        flash("Copied")
+    }
+
+    func copyAnswer() { copy(answer) }
+
+    func speakAgain() {
+        guard !answer.isEmpty else { return }
+        speaker.say(Self.spoken(answer), settings: store.value, queue: false)
+    }
+
+    func clearHistory() {
+        history.removeAll()
+        chat.removeAll()
+        question = ""
+        answer = ""
+        steps = []
     }
 
     // MARK: Pipeline
 
     private func handle(_ text: String) async {
+        guard termsAccepted else { showWindow(); return }
+        let began = Date()
         phase = .thinking
+        question = text
+        answer = ""
+        answerSource = ""
+        steps = []
         overlayText = text
         KillSwitch.shared.reset()
         log("You: \(text)")
 
         let s = store.value
+        var mode = router.heuristic(text)
+
+        // Questions about the Mac itself: answered from a live reading, on this Mac when possible.
+        if Router.isMacStatus(text) {
+            let snap = SystemMonitor.shared.snapshot()
+            let top = await SystemMonitor.shared.topProcesses()
+            let report = SystemMonitor.report(snap, top: top)
+            apply(ActionEvent(title: "Checked your Mac", detail: nil, state: .done, icon: "gauge.with.dots.needle.67percent"))
+            switch await answerLocally(text, began: began, context: report) {
+            case .answered: return
+            case .escalate, .unavailable:
+                if store.geminiKey.isEmpty && store.claudeKey.isEmpty {
+                    record(text, SystemMonitor.spokenSummary(snap), source: "On this Mac · \(Self.elapsed(began))")
+                    return
+                }
+                mode = .chat
+            }
+        } else if mode == nil || mode == .chat, !Router.needsTools(text) {
+            // Small talk and quick questions are answered on this Mac: free, private and fast.
+            switch await answerLocally(text, began: began) {
+            case .answered: return
+            case .escalate(let m): mode = m
+            case .unavailable: break
+            }
+        }
+
         guard !store.geminiKey.isEmpty || !store.claudeKey.isEmpty else {
-            reply("Add your Gemini API key in Settings first.")
+            reply("I need a Gemini API key for that. You can add one in Settings.")
             return
         }
         guard !usage.overCap(s.dailyRequestCap) else {
@@ -175,61 +389,205 @@ final class AppModel: ObservableObject {
         let client = GeminiClient(apiKey: store.geminiKey)
 
         do {
-            var mode = router.heuristic(text)
             if mode == nil, !store.geminiKey.isEmpty {
                 let r = try await client.generate(model: s.liteModel, system: Router.classifierPrompt,
                                                   contents: [["role": "user", "parts": [["text": text]]]],
-                                                  maxTokens: 8, thinkingBudget: 0)
+                                                  maxTokens: 8, thinking: GeminiAgentThinking.minimal(s.liteModel))
                 usage.add(r.usage)
                 mode = Router.parse(r.text)
             }
-            let m = mode ?? .chat
+            var m = mode ?? .chat
+            let logger: @Sendable (String) -> Void = { [weak self] line in Task { @MainActor in self?.log(line) } }
+
+            var mcpTools: [MCPTool] = []
+            if s.mcpServers.contains(where: { $0.enabled }), m != .web {
+                let id = UUID()
+                apply(ActionEvent(id: id, title: "Connecting tool servers", state: .running, icon: "puzzlepiece.extension"))
+                mcpTools = await MCPHub.shared.tools(for: s.mcpServers, log: logger)
+                apply(ActionEvent(id: id, title: "Connecting tool servers", detail: "\(mcpTools.count) tools ready", state: .done, icon: "puzzlepiece.extension"))
+            }
+
+            if m == .screen { stepAside() }
             var override: Tier?
             var outcome: AgentOutcome
-
+            var provider = ""
+            var handedToScreen = false
             while true {
-                let chain = router.chain(for: m, settings: s, from: override)
-                log("\(m.rawValue) · \(chain.first ?? "")")
-                if m == .screen { phase = .acting }
-
-                let tools = ToolBox(
-                    settings: s, memory: memory,
-                    confirm: { [weak self] q in await self?.askPermission(q) ?? false },
-                    notify: { [weak self] title, body in Task { @MainActor in self?.notify(title, body) } }
-                )
-                outcome = try await runAgent(text, mode: m, tier: override ?? router.tier(for: m, settings: s),
-                                             chain: chain, client: client, tools: tools, settings: s)
-
+                phase = m == .screen ? .acting : .thinking
+                let tools = makeTools(s, mcp: mcpTools)
+                (outcome, provider) = try await runAgent(text, mode: m, tier: override ?? router.tier(for: m, settings: s),
+                                                         chain: router.chain(for: m, settings: s, from: override),
+                                                         client: client, tools: tools, settings: s, log: logger)
+                // The model decided this needs the screen: run it again with eyes and hands.
+                if outcome.needsScreen, !handedToScreen, !KillSwitch.shared.tripped {
+                    handedToScreen = true
+                    apply(ActionEvent(title: "Switching to screen control", detail: outcome.summary, state: .done, icon: "display"))
+                    m = .screen
+                    stepAside()
+                    continue
+                }
                 // One retry on the strongest model if the first attempt gave up by itself.
                 if !outcome.success, !KillSwitch.shared.tripped, override == nil, m == .screen,
                    let up = router.escalation(from: m, settings: s) {
-                    log("Retrying with \(up.rawValue)")
+                    log("Retrying with the \(up.rawValue) model")
                     override = up
                     continue
                 }
                 break
             }
-            history.append(("user", text))
-            history.append(("assistant", outcome.summary))
-            reply(outcome.summary)
+            record(text, outcome.summary, source: "\(provider) · \(Self.elapsed(began))")
         } catch is CancellationError {
             phase = .idle
         } catch {
-            reply(error.localizedDescription)
+            reply(Friendly.message(error))
         }
+        comeBack()
+    }
+
+    private func makeTools(_ s: JarvisSettings, mcp: [MCPTool]) -> ToolBox {
+        let key = store.geminiKey
+        let tracker = usage
+        var search: (@Sendable (String) async -> String)?
+        if !key.isEmpty {
+            search = { q in
+                await AppModel.webSearch(q, key: key, settings: s) { u in Task { @MainActor in tracker.add(u) } }
+            }
+        }
+        return ToolBox(
+            settings: s, memory: memory,
+            confirm: { [weak self] q in await self?.askPermission(q) ?? false },
+            notify: { [weak self] title, body in Task { @MainActor in self?.notify(title, body) } },
+            onAction: { [weak self] e in Task { @MainActor in self?.apply(e) } },
+            mcp: mcp,
+            search: search,
+            setSetting: { [weak self] name, value in await self?.changeSetting(name, value) ?? "Couldn't change that." }
+        )
+    }
+
+    /// Grounded Google Search through Gemini, returned as text with its sources.
+    nonisolated private static func webSearch(_ q: String, key: String, settings s: JarvisSettings, usage: @escaping @Sendable (Usage) -> Void) async -> String {
+        let client = GeminiClient(apiKey: key)
+        for model in [s.flashModel, s.liteModel] {
+            do {
+                let r = try await client.generate(model: model, system: "Search the web and answer with the key facts, figures and dates. Plain text, under 150 words.",
+                                                  contents: [["role": "user", "parts": [["text": q]]]],
+                                                  tools: [["google_search": [String: Any]()]], maxTokens: 700,
+                                                  thinking: GeminiAgent.thinking(for: model, mode: .web))
+                usage(r.usage)
+                var out = r.text
+                if !r.sources.isEmpty { out += "\nSources: " + r.sources.prefix(4).map { "\($0.title) (\(URL(string: $0.url)?.host ?? $0.url))" }.joined(separator: "; ") }
+                return out.isEmpty ? "No results." : out
+            } catch {
+                continue
+            }
+        }
+        return "Couldn't search the web right now."
+    }
+
+    /// Settings Jarvis may change when asked out loud.
+    private func changeSetting(_ name: String, _ value: String) -> String {
+        let v = value.trimmingCharacters(in: .whitespaces)
+        let on = ["true", "on", "yes", "1"].contains(v.lowercased())
+        switch name {
+        case "speakReplies": store.value.speakReplies = on
+        case "voiceRate": guard let d = Double(v) else { return "Rate must be a number." }; store.value.voiceRate = min(0.65, max(0.3, d))
+        case "voiceEngine": guard ["apple", "gemini"].contains(v) else { return "Use apple or gemini." }; store.value.voiceEngine = v
+        case "geminiVoice": guard GeminiVoice.voices.contains(where: { $0.name.caseInsensitiveCompare(v) == .orderedSame }) else { return "Unknown voice." }
+            store.value.geminiVoice = GeminiVoice.voices.first { $0.name.caseInsensitiveCompare(v) == .orderedSame }!.name
+        case "theme": guard ["dark", "light", "system"].contains(v) else { return "Use dark, light or system." }; store.value.theme = v
+        case "modelChoice": guard ["auto", "lite", "flash", "pro"].contains(v) else { return "Use auto, lite, flash or pro." }; store.value.modelChoice = v
+        case "wakeWordEnabled": store.value.wakeWordEnabled = on
+        case "narrateActions": store.value.narrateActions = on
+        case "showHighlights": store.value.showHighlights = on
+        case "reduceMotion": store.value.reduceMotion = on
+        case "healthAlerts": store.value.healthAlerts = on
+        case "showTelemetry": store.value.showTelemetry = on
+        case "userName": store.value.userName = v
+        default: return "That setting can't be changed by voice. It's in Settings."
+        }
+        return "Changed \(name) to \(v)."
+    }
+
+    private enum LocalResult { case answered, escalate(Mode), unavailable }
+
+    /// Streams the local model's answer and starts speaking at the first full sentence.
+    private func answerLocally(_ text: String, began: Date, context: String? = nil) async -> LocalResult {
+        let s = store.value
+        guard let (stream, engine) = await LocalBrain.shared.stream(text, history: Array(chat.suffix(6)), settings: s, context: context) else {
+            return .unavailable
+        }
+        let streamSpeech = s.speakReplies && s.voiceEngine != "gemini"
+        var latest = ""
+        var spoken = 0
+        var decided = false
+        do {
+            for try await partial in stream {
+                if Task.isCancelled { return .answered }
+                latest = partial
+                if !decided {
+                    switch LocalBrain.verdict(partial, finished: false) {
+                    case .escalate(let m)?:
+                        log("On-device model handed this to the cloud (\(m.rawValue))")
+                        return .escalate(m)
+                    case .answer?:
+                        decided = true
+                    case nil:
+                        continue
+                    }
+                }
+                answer = Self.clean(partial)
+                overlayText = answer
+                if streamSpeech { spoken = speakSentences(answer, from: spoken, s) }
+            }
+        } catch {
+            log("On-device model failed: \(error.localizedDescription)")
+            if !decided { return .unavailable }
+        }
+        if case .escalate(let m)? = LocalBrain.verdict(latest, finished: true), !decided { return .escalate(m) }
+
+        let final = Self.clean(latest)
+        answer = final
+        overlayText = final
+        answerSource = "\(engine == .apple ? "On this Mac" : "Local model") · \(Self.elapsed(began))"
+        if s.speakReplies {
+            if streamSpeech {
+                let rest = String(final.dropFirst(spoken)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rest.isEmpty { speaker.sayLocal(rest, settings: s) }
+            } else {
+                speaker.say(Self.spoken(final), settings: s)
+            }
+        }
+        remember(text, final, source: answerSource)
+        if !speaker.isSpeaking { phase = .idle }
+        refreshOverlay()
+        return .answered
+    }
+
+    /// Speaks any sentences completed since `start` and returns the new position.
+    private func speakSentences(_ text: String, from start: Int, _ s: JarvisSettings) -> Int {
+        let chars = Array(text)
+        guard chars.count > start + 1 else { return start }
+        var end = -1
+        var i = chars.count - 2
+        while i >= start {
+            if ".!?".contains(chars[i]), chars[i + 1] == " " || chars[i + 1] == "\n" { end = i + 1; break }
+            i -= 1
+        }
+        guard end > start else { return start }
+        let sentence = String(chars[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !sentence.isEmpty { speaker.sayLocal(sentence, settings: s) }
+        return end
     }
 
     /// Claude first when it's set up and healthy; any failure drops straight to Gemini.
-    private func runAgent(_ text: String, mode: Mode, tier: Tier, chain: [String], client: GeminiClient,
-                          tools: ToolBox, settings s: JarvisSettings) async throws -> AgentOutcome {
-        let logger: @Sendable (String) -> Void = { [weak self] line in Task { @MainActor in self?.log(line) } }
-
-        // Claude has no built-in web search here, so current-events questions go to Gemini.
+    private func runAgent(_ text: String, mode: Mode, tier: Tier, chain: [String], client: GeminiClient, tools: ToolBox,
+                          settings s: JarvisSettings, log logger: @escaping @Sendable (String) -> Void) async throws -> (AgentOutcome, String) {
         if s.claudeEnabled, !store.claudeKey.isEmpty, mode != .web, Date() >= claudeBlockedUntil {
-            let agent = ClaudeAgent(client: ClaudeClient(apiKey: store.claudeKey), model: s.claudeModelID(tier), settings: s,
+            let model = s.claudeModelID(tier)
+            let agent = ClaudeAgent(client: ClaudeClient(apiKey: store.claudeKey), model: model, settings: s,
                                     tools: tools, tracker: usage, facts: memory.facts, log: logger)
             do {
-                return try await agent.run(task: text, mode: mode, history: Array(history.suffix(8)))
+                return (try await agent.run(task: text, mode: mode, history: Array(chat.suffix(8))), "Claude")
             } catch is CancellationError {
                 throw CancellationError()
             } catch let e as LLMError {
@@ -237,24 +595,161 @@ final class AppModel: ObservableObject {
                 if case .http(let code, _) = e, [400, 401, 402, 403].contains(code) {
                     claudeBlockedUntil = Date().addingTimeInterval(30 * 60)   // no credits or bad key: stop trying for a while
                 }
-                log("Claude unavailable, using Gemini.")
+                log("Claude unavailable, using Gemini. \(Friendly.message(e))")
             } catch {
                 log("Claude unavailable, using Gemini.")
             }
         }
-
         guard !store.geminiKey.isEmpty else {
             throw LLMError.other("Claude didn't work and there's no Gemini key. Add one in Settings.")
         }
         let agent = GeminiAgent(client: client, chain: chain, settings: s, tools: tools, tracker: usage,
                                 facts: memory.facts, log: logger)
-        return try await agent.run(task: text, mode: mode, history: Array(history.suffix(8)))
+        return (try await agent.run(task: text, mode: mode, history: Array(chat.suffix(8))), "Gemini")
     }
 
-    // MARK: Helpers
+    // MARK: Tests
+
+    func testGemini() async {
+        testing = true
+        defer { testing = false }
+        let (lines, models) = await ConnectionTest.gemini(key: store.geminiKey, settings: store.value)
+        var out = lines
+        if !models.isEmpty {
+            availableModels = models
+            out += useNewestModels(from: models)
+        }
+        geminiTest = out
+    }
+
+    func testClaude() async {
+        testing = true
+        defer { testing = false }
+        claudeTest = await ConnectionTest.claude(key: store.claudeKey, model: store.value.claudeLiteModel)
+    }
+
+    func testLocal() async {
+        testing = true
+        defer { testing = false }
+        var lines: [TestLine] = []
+        let apple = LocalBrain.shared.appleStatus()
+        lines.append(TestLine(kind: apple.ready ? .ok : .warn, text: apple.detail))
+        ollamaModels = await LocalBrain.shared.ollamaModels(fresh: true)
+        lines.append(ollamaModels.isEmpty
+            ? TestLine(kind: .warn, text: "Ollama isn't running. It's optional: install it from ollama.com, then run \"ollama pull llama3.2:3b\".")
+            : TestLine(kind: .ok, text: "Ollama is running with: \(ollamaModels.prefix(4).joined(separator: ", "))."))
+        let began = Date()
+        if let (stream, engine) = await LocalBrain.shared.stream("Say hello in three words.", history: [], settings: store.value) {
+            var first: TimeInterval?
+            var text = ""
+            do {
+                for try await p in stream {
+                    if first == nil { first = Date().timeIntervalSince(began) }
+                    text = p
+                }
+                let who = engine == .apple ? "Apple's on-device model" : "Ollama"
+                lines.append(TestLine(kind: .ok, text: "\(who) replied \"\(text.prefix(40))\". First words after \(String(format: "%.2f", first ?? 0)) s."))
+            } catch {
+                lines.append(TestLine(kind: .fail, text: "The local model failed: \(error.localizedDescription)"))
+            }
+        } else {
+            lines.append(TestLine(kind: .warn, text: "No local model is available, so every request goes to Gemini."))
+        }
+        localTest = lines
+    }
+
+    /// Points each tier at the newest model this key can use, when the current one isn't available.
+    @discardableResult
+    func useNewestModels(from models: [String]? = nil) -> [TestLine] {
+        let list = models ?? availableModels
+        var out: [TestLine] = []
+        for tier in Tier.allCases {
+            let current = store.value.modelID(tier)
+            guard !list.contains(current), let best = ModelPicker.newest(tier, in: list) else { continue }
+            switch tier {
+            case .lite: store.value.liteModel = best
+            case .flash: store.value.flashModel = best
+            case .pro: store.value.proModel = best
+            }
+            out.append(TestLine(kind: .ok, text: "Switched \(tier.rawValue) to \(best)."))
+        }
+        return out
+    }
+
+    // MARK: Mac care
+
+    /// Every five minutes, a cheap reading; anything worrying is said once an hour at most.
+    private func startHealthWatch() {
+        healthTimer?.invalidate()
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkHealth() }
+        }
+        healthTimer?.tolerance = 60
+    }
+
+    private func checkHealth() {
+        guard store.value.healthAlerts, !needsOnboarding else { return }
+        let alerts = SystemMonitor.alerts(SystemMonitor.shared.snapshot())
+        for a in alerts {
+            let key = String(a.prefix(24))
+            if let last = lastAlerts[key], Date().timeIntervalSince(last) < 3600 { continue }
+            lastAlerts[key] = Date()
+            notify("Jarvis", a)
+        }
+    }
+
+    // MARK: Showing what's happening
+
+    private func apply(_ e: ActionEvent) {
+        if let i = steps.firstIndex(where: { $0.id == e.id }) {
+            steps[i].state = e.state
+            if let d = e.detail { steps[i].detail = d }
+        } else {
+            steps.append(Step(id: e.id, title: e.title, detail: e.detail, state: e.state, icon: e.icon))
+        }
+        guard e.state == .running else { return }
+        overlayText = e.title
+        if let p = e.point, store.value.showHighlights {
+            highlight = Highlight(point: p, title: e.title)
+            highlightTask?.cancel()
+            highlightTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 1_600_000_000)
+                if !Task.isCancelled { self?.highlight = nil }
+            }
+        }
+        if store.value.narrateActions, store.value.speakReplies, !speaker.isSpeaking {
+            speaker.sayLocal(e.title, settings: store.value)
+        }
+    }
+
+    /// Screen tasks: move the main window out of the way so Jarvis can see and use the screen.
+    private func stepAside() {
+        let visible = NSApp.windows.filter { $0.identifier?.rawValue.contains("hud") == true && $0.isVisible }
+        if !visible.isEmpty { hudWasVisible = true }
+        visible.forEach { $0.orderOut(nil) }
+        if store.value.overlayEnabled { overlayVisible = true }
+    }
+
+    /// Brings the window back without stealing focus from the app Jarvis just used.
+    private func comeBack() {
+        guard hudWasVisible else { return }
+        hudWasVisible = false
+        NSApp.windows.first { $0.identifier?.rawValue.contains("hud") == true }?.orderFront(nil)
+    }
+
+    func showWindow() {
+        if let w = NSApp.windows.first(where: { $0.identifier?.rawValue.contains("hud") == true && $0.isVisible }) {
+            w.makeKeyAndOrderFront(nil)
+        } else if let open = openMainWindow {
+            open()
+        } else {
+            NSApp.windows.first { $0.identifier?.rawValue.contains("hud") == true }?.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     private func askPermission(_ question: String) async -> Bool {
-        speaker.say("Should I go ahead?", rate: store.value.voiceRate)
+        if store.value.speakReplies { speaker.sayLocal("Should I go ahead?", settings: store.value, queue: false) }
         let alert = NSAlert()
         alert.messageText = "Jarvis wants to continue"
         alert.informativeText = question
@@ -265,10 +760,9 @@ final class AppModel: ObservableObject {
     }
 
     private func notify(_ title: String, _ body: String) {
-        log("\(title): \(body)")
         overlayText = body
-        overlayVisible = true
-        if store.value.speakReplies { speaker.say(body, rate: store.value.voiceRate) }
+        overlayVisible = store.value.overlayEnabled
+        if store.value.speakReplies { speaker.say(body, settings: store.value) }
         if bundled {
             let c = UNMutableNotificationContent()
             c.title = title
@@ -278,37 +772,148 @@ final class AppModel: ObservableObject {
         refreshOverlay()
     }
 
-    private func reply(_ text: String) {
-        log("Jarvis: \(text)")
-        overlayText = text
+    /// Shows, speaks and keeps a finished answer.
+    private func record(_ q: String, _ a: String, source: String) {
+        reply(a, source: source)
+        remember(q, Self.clean(a), source: source)
+    }
+
+    private func remember(_ q: String, _ a: String, source: String) {
+        chat.append(("user", q))
+        chat.append(("assistant", a))
+        if chat.count > 40 { chat.removeFirst(chat.count - 40) }
+        guard store.value.keepHistory else { return }
+        history.append(Exchange(question: q, answer: a, source: source, at: Date()))
+        if history.count > 50 { history.removeFirst(history.count - 50) }
+    }
+
+    private func reply(_ text: String, source: String = "") {
+        let c = Self.clean(text)
+        answer = c
+        answerSource = source
+        overlayText = c
         phase = .idle
-        if store.value.speakReplies { speaker.say(text, rate: store.value.voiceRate) }
+        if store.value.speakReplies { speaker.say(Self.spoken(c), settings: store.value) }
+        refreshOverlay()
+    }
+
+    func flash(_ text: String) {
+        notice = text
+        noticeTask?.cancel()
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if !Task.isCancelled { self?.notice = nil }
+        }
     }
 
     func log(_ line: String) {
-        feed.append(line)
-        if feed.count > 200 { feed.removeFirst(feed.count - 200) }
+        diagnostics.append(Redact.secrets(line))
+        if diagnostics.count > 200 { diagnostics.removeFirst(diagnostics.count - 200) }
     }
 
     private func refreshOverlay() {
         hideTask?.cancel()
-        guard store.value.overlayEnabled else { overlayVisible = false; return }
+        let hudFront = NSApp?.windows.contains { $0.identifier?.rawValue.contains("hud") == true && $0.isKeyWindow && $0.isVisible } ?? false
+        if quickActive { overlayVisible = true; return }
+        guard store.value.overlayEnabled, !hudFront else { overlayVisible = false; return }
         if phase != .idle {
             overlayVisible = true
         } else {
             hideTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                if !Task.isCancelled { self?.overlayVisible = false }
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                if !Task.isCancelled, self?.quickActive == false { self?.overlayVisible = false }
             }
         }
     }
 
-    /// Esc anywhere stops whatever Jarvis is doing.
+    /// Esc anywhere stops whatever Jarvis is doing. Jarvis's own key presses carry a marker and are ignored.
     private func installKillSwitch() {
         let handler: (NSEvent) -> Void = { [weak self] e in
-            if e.keyCode == 53 { Task { @MainActor in self?.stopEverything() } }
+            guard e.keyCode == 53, e.cgEvent?.getIntegerValueField(.eventSourceUserData) != Input.marker else { return }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.quickActive, !self.busy { self.closeQuick() } else { self.stopEverything() }
+            }
         }
         if let g = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler) { monitors.append(g) }
         if let l = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { handler($0); return $0 }) { monitors.append(l) }
+    }
+
+    // MARK: Text helpers
+
+    static func elapsed(_ since: Date) -> String {
+        String(format: "%.1f s", Date().timeIntervalSince(since))
+    }
+
+    /// Plain text for the answer card: no markdown symbols.
+    static func clean(_ t: String) -> String {
+        t.components(separatedBy: "\n").map { line -> String in
+            var l = line.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "__", with: "").replacingOccurrences(of: "`", with: "")
+            while l.hasPrefix("#") { l.removeFirst() }
+            let trimmed = l.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") { l = "• " + trimmed.dropFirst(2) }
+            return l.trimmingCharacters(in: .whitespaces)
+        }
+        .joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Long answers: speak the first couple of sentences and leave the rest on screen.
+    static func spoken(_ t: String) -> String {
+        guard t.count > 420 else { return t }
+        var out = ""
+        var count = 0
+        t.enumerateSubstrings(in: t.startIndex..., options: .bySentences) { s, _, _, stop in
+            guard let s else { return }
+            out += s
+            count += 1
+            if count >= 2 || out.count > 300 { stop = true }
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines) + " The rest is on screen."
+    }
+}
+
+/// The classifier only needs one word, so it runs with the least thinking the model allows.
+enum GeminiAgentThinking {
+    static func minimal(_ model: String) -> Thinking? {
+        if model.contains("pro") { return nil }
+        return model.hasPrefix("gemini-2") ? .budget(0) : .level(model.contains("lite") ? "minimal" : "low")
+    }
+}
+
+/// Live Mac readings for the HUD, sampled only while something on screen shows them.
+@MainActor
+final class Telemetry: ObservableObject {
+    @Published private(set) var snapshot: MacSnapshot?
+    @Published private(set) var cpu: [Double] = []
+    @Published private(set) var memory: [Double] = []
+    private var timer: Timer?
+    private let keep = 40
+
+    func setActive(_ on: Bool) {
+        if on, timer == nil {
+            sample()
+            timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.sample() }
+            }
+            timer?.tolerance = 0.5
+        } else if !on, let t = timer {
+            t.invalidate()
+            timer = nil
+        }
+    }
+
+    private func sample() {
+        Task.detached(priority: .utility) {
+            let s = SystemMonitor.shared.snapshot()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.snapshot = s
+                self.cpu.append(s.cpu)
+                self.memory.append(s.memoryFraction)
+                if self.cpu.count > self.keep { self.cpu.removeFirst() }
+                if self.memory.count > self.keep { self.memory.removeFirst() }
+            }
+        }
     }
 }

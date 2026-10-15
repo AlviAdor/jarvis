@@ -1,0 +1,226 @@
+import Foundation
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
+/// Answers small requests on this Mac so they cost nothing and come back fast.
+/// Uses Apple's on-device model when Apple Intelligence is on, or a model served by Ollama.
+/// The model hands anything it shouldn't answer itself back to Gemini with an ESCALATE word.
+public final class LocalBrain: @unchecked Sendable {
+    public static let shared = LocalBrain()
+
+    public enum Engine: String, Sendable { case apple, ollama }
+
+    public enum Verdict: Sendable {
+        case answer(String)
+        case escalate(Mode)
+    }
+
+    public static let instructions = """
+    You are Jarvis, a fast voice assistant on the user's Mac. Answer in one to three short spoken sentences, plain text, no markdown, no greetings.
+    If the request needs any of the following, reply with exactly one word and nothing else:
+    ESCALATE_WEB for news, weather, prices, scores, people in the news, or anything that may have changed recently;
+    ESCALATE_SCREEN for opening apps, clicking, typing, or anything on the user's screen;
+    ESCALATE_TOOLS for email, files, folders, reminders, timers, schedules, the clipboard, or remembering something;
+    ESCALATE_HARD for long writing, code, maths, or careful multi-step reasoning.
+    If you are not certain a fact is correct, reply ESCALATE_WEB.
+    When live data about this Mac is included, answer questions about the Mac from it directly.
+    """
+
+    private let lock = NSLock()
+    private var cachedOllama: (at: Date, models: [String]) = (.distantPast, [])
+    private var lastOllamaWarm = Date.distantPast
+    private var prepared: AnyObject?
+
+    // MARK: Availability
+
+    public func appleStatus() -> (ready: Bool, detail: String) {
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, *) {
+            if case .available = SystemLanguageModel.default.availability {
+                return (true, "Apple on-device model is ready.")
+            }
+            return (false, "Apple's on-device model isn't available. Turn on Apple Intelligence in System Settings.")
+        }
+        #endif
+        return (false, "Apple's on-device model needs macOS 26 with Apple Intelligence.")
+    }
+
+    public func ollamaModels(fresh: Bool = false) async -> [String] {
+        let cached = lock.withLock { cachedOllama }
+        if !fresh, Date().timeIntervalSince(cached.at) < 30 { return cached.models }
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/tags")!)
+        req.timeoutInterval = 1.5
+        var models: [String] = []
+        if let (data, resp) = try? await URLSession.shared.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200,
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            models = (obj["models"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+        }
+        lock.withLock { cachedOllama = (Date(), models) }
+        return models
+    }
+
+    /// Small, quick models first: they reply in well under a second once loaded.
+    public static func pickSmall(_ models: [String]) -> String? {
+        let order = ["llama3.2:3b", "qwen3:4b", "gemma3:4b", "phi4-mini", "qwen2.5:3b", "llama3.2", "gemma3", "qwen3", "phi", "mistral"]
+        for p in order { if let m = models.first(where: { $0.hasPrefix(p) }) { return m } }
+        return models.first
+    }
+
+    public func resolve(_ s: JarvisSettings) async -> (Engine, String)? {
+        func ollama() async -> (Engine, String)? {
+            let list = await ollamaModels()
+            if !s.ollamaModel.isEmpty, list.contains(s.ollamaModel) { return (.ollama, s.ollamaModel) }
+            return Self.pickSmall(list).map { (.ollama, $0) }
+        }
+        switch s.localEngine {
+        case "off": return nil
+        case "apple": return appleStatus().ready ? (.apple, "apple-on-device") : nil
+        case "ollama": return await ollama()
+        default:
+            if appleStatus().ready { return (.apple, "apple-on-device") }
+            return await ollama()
+        }
+    }
+
+    // MARK: Speed
+
+    /// Called the moment the user starts speaking, so the model is loaded before they finish.
+    public func prewarm(_ s: JarvisSettings) {
+        Task {
+            guard let (engine, model) = await resolve(s) else { return }
+            switch engine {
+            case .apple:
+                #if canImport(FoundationModels)
+                if #available(macOS 26.0, *) {
+                    let session = LanguageModelSession(instructions: Self.instructions)
+                    session.prewarm()
+                    lock.withLock { prepared = session }
+                }
+                #endif
+            case .ollama:
+                let due = lock.withLock { () -> Bool in
+                    guard Date().timeIntervalSince(lastOllamaWarm) > 240 else { return false }
+                    lastOllamaWarm = Date()
+                    return true
+                }
+                guard due else { return }
+                var req = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/generate")!)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "content-type")
+                req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model, "keep_alive": "10m"])
+                _ = try? await URLSession.shared.data(for: req)
+            }
+        }
+    }
+
+    // MARK: Answering
+
+    /// Streams the growing answer text. Returns nil when no local model is available.
+    public func stream(_ prompt: String, history: [(role: String, text: String)], settings s: JarvisSettings,
+                       context: String? = nil) async -> (AsyncThrowingStream<String, Error>, Engine)? {
+        guard let (engine, model) = await resolve(s) else { return nil }
+        let live = context.map { "Live data about this Mac right now:\n\($0)\n\n" } ?? ""
+        switch engine {
+        case .apple:
+            #if canImport(FoundationModels)
+            if #available(macOS 26.0, *) {
+                var text = live
+                for h in history.suffix(6) { text += (h.role == "user" ? "User: " : "Jarvis: ") + h.text + "\n" }
+                text += text.isEmpty ? prompt : "User: \(prompt)"
+                return (appleStream(text), .apple)
+            }
+            #endif
+            return nil
+        case .ollama:
+            var messages: [[String: String]] = [["role": "system", "content": Self.instructions + (live.isEmpty ? "" : "\n\n" + live)]]
+            for h in history.suffix(6) { messages.append(["role": h.role == "user" ? "user" : "assistant", "content": h.text]) }
+            messages.append(["role": "user", "content": prompt])
+            return (ollamaStream(model: model, messages: messages), .ollama)
+        }
+    }
+
+    #if canImport(FoundationModels)
+    @available(macOS 26.0, *)
+    private func appleStream(_ prompt: String) -> AsyncThrowingStream<String, Error> {
+        let session = lock.withLock { () -> LanguageModelSession in
+            let s = (prepared as? LanguageModelSession) ?? LanguageModelSession(instructions: Self.instructions)
+            prepared = nil
+            return s
+        }
+        return AsyncThrowingStream { cont in
+            let task = Task {
+                do {
+                    for try await snap in session.streamResponse(to: prompt) { cont.yield(snap.content) }
+                    cont.finish()
+                } catch {
+                    cont.finish(throwing: error)
+                }
+            }
+            cont.onTermination = { _ in task.cancel() }
+        }
+    }
+    #endif
+
+    private func ollamaStream(model: String, messages: [[String: String]]) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { cont in
+            let task = Task {
+                do {
+                    var req = URLRequest(url: URL(string: "http://127.0.0.1:11434/api/chat")!)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "content-type")
+                    req.timeoutInterval = 60
+                    req.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "model": model, "messages": messages, "stream": true, "keep_alive": "10m",
+                        "options": ["num_predict": 300, "temperature": 0.4],
+                    ] as [String: Any])
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw LLMError.other("Ollama didn't accept the request.") }
+                    var text = ""
+                    for try await line in bytes.lines {
+                        guard let d = line.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
+                        if let m = obj["message"] as? [String: Any], let c = m["content"] as? String {
+                            text += c
+                            cont.yield(Self.stripThinking(text))
+                        }
+                        if obj["done"] as? Bool == true { break }
+                    }
+                    cont.finish()
+                } catch {
+                    cont.finish(throwing: error)
+                }
+            }
+            cont.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Reasoning models wrap their thoughts in <think> tags; only the answer is spoken.
+    static func stripThinking(_ s: String) -> String {
+        var out = s
+        while let open = out.range(of: "<think>") {
+            if let close = out.range(of: "</think>", range: open.upperBound..<out.endIndex) {
+                out.removeSubrange(open.lowerBound..<close.upperBound)
+            } else {
+                out.removeSubrange(open.lowerBound..<out.endIndex)
+            }
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Decides early whether the stream is an answer or a hand-off. nil means "not sure yet".
+    public static func verdict(_ text: String, finished: Bool) -> Verdict? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let upper = t.uppercased()
+        if upper.hasPrefix("ESCALATE") || (!finished && "ESCALATE".hasPrefix(upper) && !upper.isEmpty) {
+            guard finished || upper.count >= 12 else { return nil }
+            if upper.contains("WEB") { return .escalate(.web) }
+            if upper.contains("SCREEN") { return .escalate(.screen) }
+            if upper.contains("HARD") { return .escalate(.hard) }
+            if upper.contains("TOOL") { return .escalate(.chat) }
+            return finished ? .escalate(.chat) : nil
+        }
+        if t.isEmpty { return finished ? .escalate(.chat) : nil }
+        return .answer(t)
+    }
+}

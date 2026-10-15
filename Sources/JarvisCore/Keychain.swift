@@ -17,6 +17,7 @@ public enum Keychain {
         guard !value.isEmpty else { return }
         var q = base(account)
         q[kSecValueData as String] = Data(value.utf8)
+        q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         SecItemAdd(q as CFDictionary, nil)
     }
 

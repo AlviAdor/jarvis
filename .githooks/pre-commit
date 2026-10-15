@@ -1,0 +1,3 @@
+#!/bin/sh
+# Blocks commits that would publish an API key, token or private key.
+exec "$(git rev-parse --show-toplevel)/scripts/check_secrets.sh" --staged

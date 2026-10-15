@@ -10,6 +10,7 @@ let package = Package(
         .executableTarget(
             name: "Jarvis",
             dependencies: ["JarvisCore"],
+            exclude: ["Info.plist"],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT",

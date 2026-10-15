@@ -46,9 +46,12 @@ public enum LLMError: Error, LocalizedError {
 public struct AgentOutcome: Sendable {
     public let success: Bool
     public let summary: String
-    public init(success: Bool, summary: String) {
+    /// Set when the model decided the job needs the screen; the caller reruns it in screen mode.
+    public var needsScreen = false
+    public init(success: Bool, summary: String, needsScreen: Bool = false) {
         self.success = success
         self.summary = summary
+        self.needsScreen = needsScreen
     }
 }
 
@@ -85,5 +88,25 @@ public final class UsageTracker: ObservableObject {
     public func overCap(_ cap: Int) -> Bool {
         if day != Self.today() { load() }
         return requests >= cap
+    }
+}
+
+/// One visible step of what Jarvis is doing, shown live in the UI.
+public struct ActionEvent: Identifiable, Sendable {
+    public enum State: Sendable { case running, done, failed }
+    public let id: UUID
+    public var title: String
+    public var detail: String?
+    public var point: CGPoint?   // screen points, top-left origin
+    public var state: State
+    public var icon: String?     // SF Symbol shown next to the step
+
+    public init(id: UUID = UUID(), title: String, detail: String? = nil, point: CGPoint? = nil, state: State, icon: String? = nil) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.point = point
+        self.state = state
+        self.icon = icon
     }
 }

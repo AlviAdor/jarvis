@@ -14,7 +14,13 @@ final class AudioGate: @unchecked Sendable {
     private var began = Date()
     private var ended = false
 
+    private let features = VoiceFeatures()
+    private(set) var latestLevel: Float = 0
+    /// Slow-moving estimate of the room's background level, so a fan or air conditioning never counts as speech.
+    private var noiseFloor: Float = 0.004
+
     var threshold: Float = 0.02
+    var pause: TimeInterval = 1.0
     var suspended = false
     var onSpeechStart: (@Sendable () -> Void)?
     var onSilence: (@Sendable () -> Void)?
@@ -35,8 +41,10 @@ final class AudioGate: @unchecked Sendable {
         lock.lock()
         if let req = request {
             req.append(buffer)
+            latestLevel = level
+            features.add(buffer, loudEnough: level > threshold)
             if level > threshold { lastLoud = Date() }
-            let quiet = Date().timeIntervalSince(lastLoud) > 1.2
+            let quiet = Date().timeIntervalSince(lastLoud) > pause
             let tooLong = Date().timeIntervalSince(began) > 25
             if (quiet || tooLong) && !ended {
                 ended = true
@@ -49,15 +57,24 @@ final class AudioGate: @unchecked Sendable {
         }
         preroll.append(buffer)
         if preroll.count > 4 { preroll.removeFirst() }
-        loudRun = level > threshold ? loudRun + 1 : 0
+        // Follow quiet periods quickly and loud ones slowly, so speech barely moves the floor.
+        noiseFloor += (level - noiseFloor) * (level < noiseFloor ? 0.2 : 0.005)
+        let trigger = max(threshold, noiseFloor * 3)
+        loudRun = level > trigger ? loudRun + 1 : 0
         let fire = loudRun >= 2 && !starting
         if fire { starting = true }
         lock.unlock()
         if fire { onSpeechStart?() }
     }
 
+    func takeVector() -> [Float]? {
+        lock.lock(); defer { lock.unlock() }
+        return features.vector()
+    }
+
     func attach(_ req: SFSpeechAudioBufferRecognitionRequest) {
         lock.lock()
+        features.reset()
         for b in preroll { req.append(b) }
         preroll.removeAll()
         request = req
@@ -83,8 +100,19 @@ public final class VoiceEngine: ObservableObject {
     @Published public private(set) var armed = false
     @Published public private(set) var running = false
     @Published public private(set) var hearing = false
+    @Published public private(set) var level: Float = 0
+    @Published public private(set) var enrollProgress: Int?   // samples captured so far while enrolling
+    @Published public private(set) var profile: VoiceProfile? = VoiceProfile.load()
 
     public var onCommand: ((String) -> Void)?
+    public var onRejected: (() -> Void)?
+    public var onEnrolled: ((Bool) -> Void)?
+    public var lockEnabled = false
+    public var lockStrictness = 0.5
+    public static let enrollTarget = 5
+    private var enrollSamples: [[Float]] = []
+    private var pushArmed = false
+    private var levelTimer: Timer?
     public var wakeEnabled = true
     public var wakeWord = "jarvis"
 
@@ -96,6 +124,13 @@ public final class VoiceEngine: ObservableObject {
         get { gate.suspended }
         set { gate.suspended = newValue }
     }
+    public var pause: TimeInterval {
+        get { gate.pause }
+        set { gate.pause = newValue }
+    }
+    public var onSpeechStart: (() -> Void)?
+    /// The wake word was just heard in a sentence that's still going.
+    public var onWakeHeard: (() -> Void)?
 
     private let recognizer = SFSpeechRecognizer(locale: Locale.current)
     private let engine = AVAudioEngine()
@@ -153,8 +188,9 @@ public final class VoiceEngine: ObservableObject {
     }
 
     /// Push-to-talk: treat the next utterance as a command, no wake word needed.
-    public func arm() {
+    public func arm(push: Bool = false) {
         armed = true
+        pushArmed = push
         armTimeout?.cancel()
         armTimeout = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 8_000_000_000)
@@ -165,19 +201,53 @@ public final class VoiceEngine: ObservableObject {
     public func disarm() {
         armTimeout?.cancel()
         armed = false
+        pushArmed = false
+    }
+
+    // MARK: Voice match
+
+    public func startEnrollment() {
+        enrollSamples = []
+        enrollProgress = 0
+    }
+
+    public func cancelEnrollment() {
+        enrollProgress = nil
+        enrollSamples = []
+    }
+
+    public func removeProfile() {
+        VoiceProfile.delete()
+        profile = nil
+    }
+
+    private func passesLock(_ v: [Float]?) -> Bool {
+        guard lockEnabled, let profile, !pushArmed else { return true }
+        guard let v else { return false }
+        return profile.matches(v, strictness: lockStrictness)
     }
 
     private func beginUtterance() {
         guard running, request == nil, let recognizer, recognizer.isAvailable else { gate.detach(); return }
         // Ambient speech is ignored unless wake word listening is on or the user armed us.
-        guard wakeEnabled || armed else { gate.detach(); return }
+        guard wakeEnabled || armed || enrollProgress != nil else { gate.detach(); return }
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         if recognizer.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         request = req
         hearing = true
+        onSpeechStart?()
         gate.attach(req)
+        levelTimer?.invalidate()
+        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // Only animate for speech meant for Jarvis; background talk and the TV leave the UI alone.
+                guard self.armed || !self.partial.isEmpty || self.enrollProgress != nil else { return }
+                self.level = min(1, self.gate.latestLevel * 8)
+            }
+        }
 
         task = recognizer.recognitionTask(with: req) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
@@ -187,15 +257,41 @@ public final class VoiceEngine: ObservableObject {
     }
 
     private func update(_ text: String?, final: Bool) {
-        if let text, armed || containsWake(text) { partial = text }
+        if let text, armed || containsWake(text) || enrollProgress != nil {
+            if partial.isEmpty, !armed, enrollProgress == nil { onWakeHeard?() }
+            partial = text
+        }
         guard final else { return }
         let heard = text ?? partial
         request = nil
         task = nil
         hearing = false
+        levelTimer?.invalidate()
+        level = 0
+        let vector = gate.takeVector()
         gate.detach()
-        deliver(heard)
+        if enrollProgress != nil {
+            collect(vector, heard: heard)
+        } else if passesLock(vector) {
+            deliver(heard)
+        } else if containsWake(heard) || armed {
+            onRejected?()
+        }
         partial = ""
+    }
+
+    private func collect(_ v: [Float]?, heard: String) {
+        guard let v, heard.split(separator: " ").count >= 2 else { return }   // needs a real phrase
+        enrollSamples.append(v)
+        enrollProgress = enrollSamples.count
+        if enrollSamples.count >= Self.enrollTarget {
+            let p = VoiceProfile.enroll(enrollSamples)
+            p?.save()
+            profile = p
+            enrollProgress = nil
+            enrollSamples = []
+            onEnrolled?(p != nil)
+        }
     }
 
     private func containsWake(_ s: String) -> Bool {
@@ -229,34 +325,94 @@ public final class VoiceEngine: ObservableObject {
 }
 
 @MainActor
-public final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
+public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
     private let synth = AVSpeechSynthesizer()
+    private var player: AVAudioPlayer?
+    private var fetch: Task<Void, Never>?
     public var onSpeakingChange: ((Bool) -> Void)?
+    /// Called with a reason when the Gemini voice can't be used and the Mac voice takes over.
+    public var onFallback: ((String) -> Void)?
+    public var geminiKey: () -> String = { "" }
+
+    public var isSpeaking: Bool { synth.isSpeaking || (player?.isPlaying ?? false) || fetch != nil }
 
     public override init() {
         super.init()
         synth.delegate = self
     }
 
-    public func say(_ text: String, rate: Double) {
+    /// Speaks with the voice chosen in settings. The Gemini voice falls back to the Mac's voice on any error.
+    public func say(_ text: String, settings s: JarvisSettings, queue: Bool = true) {
+        if s.voiceEngine == "gemini", !geminiKey().isEmpty {
+            sayGemini(text, s)
+        } else {
+            sayLocal(text, settings: s, queue: queue)
+        }
+    }
+
+    /// Always the Mac's own voice: instant, offline, used for streamed sentences and short step narration.
+    public func sayLocal(_ text: String, settings s: JarvisSettings, queue: Bool = true) {
+        if !queue { stop() }
         let u = AVSpeechUtterance(string: text)
-        u.rate = Float(rate)
+        u.rate = Float(s.voiceRate)
+        u.pitchMultiplier = Float(s.voicePitch)
+        u.volume = Float(s.voiceVolume)
+        if !s.voiceID.isEmpty, let v = AVSpeechSynthesisVoice(identifier: s.voiceID) { u.voice = v }
         onSpeakingChange?(true)
         synth.speak(u)
     }
 
-    public func stop() {
-        synth.stopSpeaking(at: .immediate)
-    }
-
-    nonisolated public func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            if !self.synth.isSpeaking { self.onSpeakingChange?(false) }
+    private func sayGemini(_ text: String, _ s: JarvisSettings) {
+        stop()
+        onSpeakingChange?(true)
+        let key = geminiKey()
+        fetch = Task { [weak self] in
+            do {
+                let wav = try await GeminiVoice.synthesize(text, voice: s.geminiVoice, style: s.voiceStyle, model: s.ttsModel, key: key)
+                guard let self, !Task.isCancelled else { return }
+                self.fetch = nil
+                let p = try AVAudioPlayer(data: wav)
+                p.delegate = self
+                p.volume = Float(s.voiceVolume)
+                self.player = p
+                p.play()
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.fetch = nil
+                self.onFallback?(Friendly.message(error))
+                self.sayLocal(text, settings: s, queue: false)
+            }
         }
     }
 
+    public func stop() {
+        fetch?.cancel()
+        fetch = nil
+        player?.stop()
+        player = nil
+        synth.stopSpeaking(at: .immediate)
+        onSpeakingChange?(false)
+    }
+
+    private func finished() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if !self.isSpeaking { self.onSpeakingChange?(false) }
+        }
+    }
+
+    nonisolated public func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) {
+        Task { @MainActor in self.finished() }
+    }
+
     nonisolated public func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) {
-        Task { @MainActor in self.onSpeakingChange?(false) }
+        Task { @MainActor in self.finished() }
+    }
+
+    nonisolated public func audioPlayerDidFinishPlaying(_ p: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            self.player = nil
+            self.finished()
+        }
     }
 }

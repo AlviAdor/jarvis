@@ -60,14 +60,22 @@ public final class ClaudeAgent: @unchecked Sendable {
         var first: [[String: Any]] = [["type": "text", "text": task]]
         if screenMode {
             try Permissions.ensureAccessibility()
-            first.append(ClaudeClient.imageBlock(try Screen.capture().jpeg))
+            let shot = try await Screen.capture()
+            first.append(ClaudeClient.imageBlock(shot.jpeg))
+            first.append(["type": "text", "text": ScreenReader.describe(shot, screen: screenSize)])
         }
         messages.append(["role": "user", "content": first])
 
         let system = jarvisSystemPrompt(mode: mode, settings: settings, facts: facts)
         let toolDefs = tools.anthropicTools(screen: screenMode)
         // Older screenshots can't be pruned without editing history, so keep Claude's screen runs short.
-        let limit = screenMode ? min(settings.maxSteps, 15) : 6
+        let limit = screenMode ? min(settings.maxSteps, 15) : 12
+        let effort: String
+        switch mode {
+        case .chat, .web: effort = "low"
+        case .screen: effort = "medium"
+        case .hard: effort = "high"
+        }
 
         for step in 1...limit {
             if KillSwitch.shared.tripped { return AgentOutcome(success: false, summary: "Stopped.") }
@@ -81,6 +89,7 @@ public final class ClaudeAgent: @unchecked Sendable {
                 "tools": toolDefs,
                 "messages": messages,
                 "cache_control": ["type": "ephemeral"],
+                "output_config": ["effort": effort],
             ])
             await tracker.add(ClaudeClient.usage(obj))
 
@@ -109,7 +118,9 @@ public final class ClaudeAgent: @unchecked Sendable {
             }
             if wantShot, var last = results.popLast(), var block = last["content"] as? [[String: Any]] {
                 try? await Task.sleep(nanoseconds: 400_000_000)
-                block.append(ClaudeClient.imageBlock(try Screen.capture().jpeg))
+                let shot = try await Screen.capture()
+                block.append(ClaudeClient.imageBlock(shot.jpeg))
+                block.append(["type": "text", "text": ScreenReader.describe(shot, screen: screenSize)])
                 last["content"] = block
                 results.append(last)
             }

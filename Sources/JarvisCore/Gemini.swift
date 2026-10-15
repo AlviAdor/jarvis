@@ -3,15 +3,30 @@ import Foundation
 public struct GeminiResponse: @unchecked Sendable {
     public var parts: [[String: Any]]
     public var usage: Usage
+    public var searchQueries: [String] = []
+    public var sources: [(title: String, url: String)] = []
 
     public var text: String {
         parts.compactMap { $0["text"] as? String }.joined()
     }
 
-    public var calls: [(name: String, args: [String: Any])] {
+    public var calls: [(name: String, args: [String: Any], id: String?)] {
         parts.compactMap { p in
             guard let fc = p["functionCall"] as? [String: Any], let name = fc["name"] as? String else { return nil }
-            return (name, fc["args"] as? [String: Any] ?? [:])
+            return (name, fc["args"] as? [String: Any] ?? [:], fc["id"] as? String)
+        }
+    }
+}
+
+/// Gemini 2.x takes a token budget; Gemini 3.x takes a level. Sending both is a 400.
+public enum Thinking: Sendable, Equatable {
+    case budget(Int)
+    case level(String)
+
+    var json: [String: Any] {
+        switch self {
+        case .budget(let n): return ["thinkingBudget": n]
+        case .level(let l): return ["thinkingLevel": l]
         }
     }
 }
@@ -35,9 +50,9 @@ public final class GeminiClient: @unchecked Sendable {
     }
 
     public func generate(model: String, system: String, contents: [[String: Any]], tools: [[String: Any]] = [],
-                         maxTokens: Int = 1024, thinkingBudget: Int? = nil) async throws -> GeminiResponse {
+                         maxTokens: Int = 1024, thinking: Thinking? = nil) async throws -> GeminiResponse {
         var gen: [String: Any] = ["maxOutputTokens": maxTokens]
-        if let thinkingBudget { gen["thinkingConfig"] = ["thinkingBudget": thinkingBudget] }
+        if let thinking { gen["thinkingConfig"] = thinking.json }
         var body: [String: Any] = [
             "systemInstruction": ["parts": [["text": system]]],
             "contents": contents,
@@ -84,7 +99,15 @@ public final class GeminiClient: @unchecked Sendable {
         if parts.isEmpty, let reason = cand["finishReason"] as? String, reason != "STOP" {
             throw LLMError.refused(reason)
         }
-        return GeminiResponse(parts: parts, usage: usage)
+        var r = GeminiResponse(parts: parts, usage: usage)
+        if let gm = cand["groundingMetadata"] as? [String: Any] {
+            r.searchQueries = gm["webSearchQueries"] as? [String] ?? []
+            r.sources = (gm["groundingChunks"] as? [[String: Any]] ?? []).compactMap { c in
+                guard let web = c["web"] as? [String: Any], let uri = web["uri"] as? String else { return nil }
+                return (web["title"] as? String ?? uri, uri)
+            }
+        }
+        return r
     }
 
     /// Model ids that support generateContent, for the settings pickers.

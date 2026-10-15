@@ -1,62 +1,172 @@
 import SwiftUI
 import AppKit
 import Combine
+import JarvisCore
 
-private struct OverlayView: View {
+/// The floating bar. Opened with the shortcut it takes typing and voice; while Jarvis works on its own
+/// it shows what's happening and lets clicks pass through.
+private struct QuickView: View {
     @EnvironmentObject var model: AppModel
+    @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 14) {
-            OrbView(phase: model.phase, accent: model.accent, still: model.store.value.reduceMotion)
-                .frame(width: 64, height: 64)
-            Text(model.overlayText.isEmpty ? "Listening" : model.overlayText)
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        // Nothing to draw or update while the bar is hidden.
+        if model.overlayVisible || model.quickActive { content } else { Color.clear.frame(width: 1, height: 1) }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 14) {
+                LiveOrb(voice: model.voice, phase: model.phase, accent: model.accent, still: model.store.value.reduceMotion)
+                    .frame(width: 54, height: 54)
+                VStack(alignment: .leading, spacing: 4) {
+                    MicroLabel(text: label, color: model.accent)
+                    Text(model.overlayText.isEmpty ? "Go ahead, I'm listening" : model.overlayText)
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .lineLimit(model.quickActive ? 8 : 3)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if model.quickActive {
+                    VStack(spacing: 6) {
+                        OrbButton(icon: "xmark", size: 22) { model.closeQuick() }
+                        if !model.answer.isEmpty, model.phase == .idle || model.phase == .speaking {
+                            OrbButton(icon: "doc.on.doc", size: 22) { model.copyAnswer() }
+                                .help("Copy the answer")
+                        }
+                    }
+                }
+            }
+            if model.busy, let running = model.steps.last {
+                HStack(spacing: 8) {
+                    Image(systemName: running.icon ?? "bolt.fill").foregroundStyle(model.accent).font(.caption)
+                    Text(running.title).font(.caption.weight(.medium))
+                    if let d = running.detail {
+                        Text(d).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    if model.steps.count > 1 { MicroLabel(text: "step \(model.steps.count)") }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.primary.opacity(0.06), in: Capsule())
+            }
+            if model.quickActive {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(model.accent)
+                    TextField("Type instead, or just speak…", text: $model.typed)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14, design: .rounded))
+                        .focused($focused)
+                        .onSubmit { model.submit(model.typed) }
+                    MicroLabel(text: "esc to close")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color.primary.opacity(0.07), in: Capsule())
+                .onAppear { focused = true }
+            }
         }
-        .padding(14)
-        .frame(width: 380, height: 96)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(model.accent.opacity(0.5), lineWidth: 1))
-        .preferredColorScheme(.dark)
+        .padding(16)
+        .frame(width: 600)
+        .glassCard(26)
+        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(model.accent.opacity(0.4), lineWidth: 1))
+        .preferredColorScheme(model.colorScheme)
+        .tint(model.accent)
+        .padding(10)   // room for the shadow
+    }
+
+    private var label: String {
+        switch model.phase {
+        case .idle: return model.answer.isEmpty ? "Jarvis" : "Jarvis · \(model.answerSource)"
+        case .listening: return "Listening"
+        case .thinking: return "Thinking"
+        case .acting: return "Working · Esc to stop"
+        case .speaking: return "Jarvis"
+        }
     }
 }
 
-/// Small floating HUD that appears while Jarvis is working and fades away afterwards.
+/// A panel that can take keyboard focus without activating Jarvis's other windows.
+final class QuickPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor
 final class OverlayController {
-    private let panel: NSPanel
+    private let panel: QuickPanel
+    private let host: NSHostingController<AnyView>
     private var bag = Set<AnyCancellable>()
+    private weak var model: AppModel?
 
     init(model: AppModel) {
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 96),
-                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        self.model = model
+        host = NSHostingController(rootView: AnyView(QuickView().environmentObject(model)))
+        host.sizingOptions = [.preferredContentSize]
+        host.view.wantsLayer = true
+        host.view.layer?.backgroundColor = .clear
+        panel = QuickPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 120),
+                           styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView], backing: .buffered, defer: true)
+        panel.contentViewController = host
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.ignoresMouseEvents = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.hidesOnDeactivate = false
+        panel.sharingType = .none   // keep it out of the screenshots the model sees
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.contentView = NSHostingView(rootView: OverlayView().environmentObject(model))
 
         model.$overlayVisible.removeDuplicates().sink { [weak self] visible in
             visible ? self?.show() : self?.hide()
         }.store(in: &bag)
+        model.$quickActive.removeDuplicates().sink { [weak self] active in
+            guard let self else { return }
+            self.panel.ignoresMouseEvents = !active
+            if active {
+                self.show()
+                self.panel.makeKey()
+            }
+        }.store(in: &bag)
+        NotificationCenter.default.publisher(for: NSWindow.didResizeNotification, object: panel)
+            .sink { [weak self] _ in self?.place() }
+            .store(in: &bag)
+        NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification, object: panel)
+            .sink { [weak self] _ in
+                guard let m = self?.model, m.quickActive, !m.busy, m.phase != .listening else { return }
+                m.closeQuick()
+            }
+            .store(in: &bag)
+    }
+
+    /// Top centre of the screen with the pointer, just under the menu bar.
+    private func place() {
+        guard panel.frame.width > 10 else { return }
+        let mouse = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main else { return }
+        let f = screen.visibleFrame
+        let size = panel.frame.size
+        panel.setFrameOrigin(NSPoint(x: f.midX - size.width / 2, y: f.maxY - size.height - 8))
     }
 
     private func show() {
-        guard let screen = NSScreen.main else { return }
-        let f = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: f.midX - 190, y: f.maxY - 110))
-        panel.alphaValue = 0
-        panel.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { $0.duration = 0.2; panel.animator().alphaValue = 1 }
+        place()
+        if !panel.isVisible {
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.18; panel.animator().alphaValue = 1 }
+        }
     }
 
     private func hide() {
-        NSAnimationContext.runAnimationGroup({ $0.duration = 0.4; panel.animator().alphaValue = 0 },
+        NSAnimationContext.runAnimationGroup({ $0.duration = 0.35; panel.animator().alphaValue = 0 },
                                              completionHandler: { [panel] in if panel.alphaValue == 0 { panel.orderOut(nil) } })
     }
 }

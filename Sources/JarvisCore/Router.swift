@@ -4,9 +4,8 @@ public struct Router: Sendable {
     public init() {}
 
     private static let screenWords = [
-        "open ", "click", "type ", "scroll", "close ", "launch", "go to", "search for",
-        "play ", "press ", "on my screen", "drag", "switch to", "start ", "take a screenshot",
-        "what's on my screen", "what is on my screen",
+        "open ", "click", "scroll", "close ", "go to", "search for", "press ", "on my screen", "drag",
+        "switch to", "take a screenshot", "what's on my screen", "what is on my screen", "fill in", "fill out",
     ]
     private static let webWords = [
         "latest", "news", "weather", "score", "price of", "stock", "today's", "who won",
@@ -15,11 +14,45 @@ public struct Router: Sendable {
     private static let hardWords = [
         "analyze", "analyse", "architect", "debug", "prove", "refactor", "strategy",
         "step by step", "write a detailed", "compare and contrast", "design a", "essay",
+        "think hard", "think carefully", "in depth", "deep dive", "thoroughly", "take your time",
     ]
+
+    private static let toolWords = [
+        "remember", "remind", "schedule", "every day", "every morning", "every evening", "every week",
+        "timer", "alarm", "email", "e-mail", " mail", "inbox", "file", "folder", "document", "clipboard",
+        "copy ", "paste", "download", "git ", "repo", "command", "terminal", " open ", " quit ", " launch",
+        " type ", "clean", "free up", "organi", "tidy", "duplicate", "trash", "calendar", "meeting",
+        " event", "appointment", "agenda", "reminder", "contact", "phone number", " note", "imessage",
+        " message ", " text ", " music", " song", " play", " pause", " skip", "volume", " mute", "brightness",
+        "dark mode", "light mode", "wi-fi", "wifi", "shortcut", " lock ", "lock the", "lock my", "setting",
+        " forget", "briefing", "brief me", " pdf", "find my", "running apps", "what apps",
+    ]
+
+    private static let macWords = [
+        "battery", "storage", "disk space", "free space", "hard drive", " ssd", "memory usage", " ram",
+        " cpu", "processor", "temperature", "overheat", "hot", "my mac", "this mac", "uptime", "fan",
+        "running slow", "so slow", "laggy", "health of", "system status", "how much space",
+    ]
+
+    /// Requests that need Jarvis's tools skip the local model, which can't use them.
+    public static func needsTools(_ text: String) -> Bool {
+        let s = " " + text.lowercased() + " "
+        return toolWords.contains { s.contains($0) }
+    }
+
+    /// Questions about the Mac itself. The local model can answer these from a live reading.
+    public static func isMacStatus(_ text: String) -> Bool {
+        let s = " " + text.lowercased() + " "
+        let acting = ["clean", "free up", "delete", "organi", "remove", "tidy", "empty", "quit", "close"].contains { s.contains($0) }
+        return !acting && macWords.contains { s.contains($0) }
+    }
 
     /// Free first pass; returns nil when a model should decide.
     public func heuristic(_ text: String) -> Mode? {
         let s = text.lowercased()
+        let words = s.split(separator: " ")
+        // "Open Safari" alone is one tool call; no need to look at the screen.
+        if s.hasPrefix("open "), words.count <= 3, !s.contains(".") { return .chat }
         if Self.screenWords.contains(where: { s.contains($0) }) { return .screen }
         if Self.webWords.contains(where: { s.contains($0) }) { return .web }
         if Self.hardWords.contains(where: { s.contains($0) }) || s.split(separator: " ").count > 120 { return .hard }
@@ -29,7 +62,7 @@ public struct Router: Sendable {
 
     public static let classifierPrompt = """
     Classify the user's request. Reply with exactly one word:
-    chat - conversation, a simple question, or a task for tools like mail, notes, reminders, files
+    chat - conversation, a simple question, or a task for tools: mail, calendar, reminders, notes, messages, files, music, volume, settings, disk cleanup, the Mac's health
     web - needs current information from the internet
     screen - needs operating the computer (apps, clicking, typing, browsing)
     hard - complex reasoning, long writing, or code

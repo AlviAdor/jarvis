@@ -6,9 +6,13 @@ permissions:
   contents: write
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No secrets
+        run: ./scripts/check_secrets.sh
       - name: Test
         run: swift test
       - name: Bundle

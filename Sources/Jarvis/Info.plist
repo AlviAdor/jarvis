@@ -2,38 +2,57 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>
-    <string>app.jarvis</string>
-    <key>CFBundleName</key>
-    <string>Jarvis</string>
-    <key>CFBundleExecutable</key>
-    <string>Jarvis</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>app.jarvis</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>jarvis</string>
-            </array>
-        </dict>
-    </array>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Jarvis reads and sends mail on your behalf when you ask.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Jarvis listens to your voice to take requests.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Jarvis transcribes your voice on this Mac.</string>
+	<key>CFBundleExecutable</key>
+	<string>Jarvis</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.jarvis</string>
+	<key>CFBundleName</key>
+	<string>Jarvis</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.4.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.jarvis</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>jarvis</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Jarvis controls Mail, Notes, Messages, Music, Finder and System Events only when you ask it to.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Jarvis reads and adds calendar events when you ask, for example "what's on today?".</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Jarvis reads and adds calendar events when you ask, for example "what's on today?".</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Jarvis looks up a person's number or email when you ask. Your address book never leaves your Mac unless a reply needs it.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 AlviAdor</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Jarvis listens to your voice to take requests.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Jarvis reads and adds reminders when you ask.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Jarvis reads and adds reminders when you ask.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Jarvis transcribes your voice on this Mac.</string>
 </dict>
 </plist>
