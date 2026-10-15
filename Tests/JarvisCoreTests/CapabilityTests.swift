@@ -405,3 +405,22 @@ final class AttachmentTests: XCTestCase {
         XCTAssertThrowsError(try Attachment.load(big))
     }
 }
+
+final class ConversationFlowTests: XCTestCase {
+    func testUnfinishedSentencesGetMoreTime() {
+        for t in ["remind me to call mum and", "open the file with", "I want to know about,", "set a timer because um"] {
+            XCTAssertTrue(VoiceEngine.soundsUnfinished(t), t)
+        }
+        for t in ["what's the weather in Dhaka", "open Safari", "thanks"] {
+            XCTAssertFalse(VoiceEngine.soundsUnfinished(t), t)
+        }
+    }
+
+    func testOlderSettingsGetLongerPauses() throws {
+        let old = try JSONSerialization.data(withJSONObject: ["settingsVersion": 2, "responsePause": 0.9, "showTelemetry": true])
+        let s = JarvisSettings.load(from: old)
+        XCTAssertEqual(s.responsePause, 1.4)
+        XCTAssertTrue(s.showTelemetry)   // version 2 already chose this, so it stays
+        XCTAssertTrue(s.bargeIn)
+    }
+}

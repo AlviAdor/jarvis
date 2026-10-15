@@ -21,9 +21,20 @@ final class AudioGate: @unchecked Sendable {
 
     var threshold: Float = 0.02
     var pause: TimeInterval = 1.0
-    var suspended = false
+    /// Extra patience while the sentence sounds unfinished ("…and", "because…").
+    var extraPause: TimeInterval = 0
+    /// Jarvis is talking. With `bargeIn`, the mic still listens for the user talking over it.
+    var suspended = false {
+        didSet { if suspended && !oldValue { echo = 0; bargeRun = 0; speakingSince = Date() } }
+    }
+    var bargeIn = true
     var onSpeechStart: (@Sendable () -> Void)?
     var onSilence: (@Sendable () -> Void)?
+    var onBargeIn: (@Sendable () -> Void)?
+    /// How loud Jarvis's own voice is in the mic, learned while it speaks.
+    private var echo: Float = 0
+    private var bargeRun = 0
+    private var speakingSince = Date()
 
     static func rms(_ b: AVAudioPCMBuffer) -> Float {
         guard let ch = b.floatChannelData?[0] else { return 0 }
@@ -36,7 +47,11 @@ final class AudioGate: @unchecked Sendable {
     }
 
     func process(_ buffer: AVAudioPCMBuffer) {
-        if suspended { return }
+        if suspended {
+            guard bargeIn else { return }
+            listenOverSpeech(buffer)
+            return
+        }
         let level = Self.rms(buffer)
         lock.lock()
         if let req = request {
@@ -44,7 +59,7 @@ final class AudioGate: @unchecked Sendable {
             latestLevel = level
             features.add(buffer, loudEnough: level > threshold)
             if level > threshold { lastLoud = Date() }
-            let quiet = Date().timeIntervalSince(lastLoud) > pause
+            let quiet = Date().timeIntervalSince(lastLoud) > pause + extraPause
             let tooLong = Date().timeIntervalSince(began) > 25
             if (quiet || tooLong) && !ended {
                 ended = true
@@ -67,6 +82,25 @@ final class AudioGate: @unchecked Sendable {
         if fire { onSpeechStart?() }
     }
 
+    /// While Jarvis talks: learn how its own voice sounds in the mic for the first moment, then treat
+    /// a quarter second of clearly louder sound as the user talking over it.
+    private func listenOverSpeech(_ buffer: AVAudioPCMBuffer) {
+        let level = Self.rms(buffer)
+        lock.lock()
+        preroll.append(buffer)
+        if preroll.count > 6 { preroll.removeFirst() }
+        let warm = Date().timeIntervalSince(speakingSince) > 0.4
+        let trigger = max(threshold * 1.8, echo * 2.0, noiseFloor * 5)
+        if !warm || level <= trigger {
+            echo += (level - echo) * (level > echo ? 0.35 : 0.02)
+        }
+        bargeRun = warm && level > trigger ? bargeRun + 1 : 0
+        let fire = bargeRun >= 3
+        if fire { bargeRun = 0 }
+        lock.unlock()
+        if fire { onBargeIn?() }
+    }
+
     func takeVector() -> [Float]? {
         lock.lock(); defer { lock.unlock() }
         return features.vector()
@@ -81,6 +115,7 @@ final class AudioGate: @unchecked Sendable {
         lastLoud = Date()
         began = Date()
         ended = false
+        extraPause = 0
         lock.unlock()
     }
 
@@ -128,6 +163,23 @@ public final class VoiceEngine: ObservableObject {
         get { gate.suspended }
         set { gate.suspended = newValue }
     }
+    /// Lets the user interrupt Jarvis by talking over it.
+    public var bargeInEnabled: Bool {
+        get { gate.bargeIn }
+        set { gate.bargeIn = newValue }
+    }
+    public var onBargeIn: (() -> Void)?
+
+    /// Sentences that stop on a word like "and" or "because" aren't finished yet.
+    nonisolated public static func soundsUnfinished(_ text: String) -> Bool {
+        let t = text.lowercased().trimmingCharacters(in: .whitespaces)
+        if t.hasSuffix(",") || t.hasSuffix("-") { return true }
+        guard let last = t.split(separator: " ").last.map({ String($0).trimmingCharacters(in: .punctuationCharacters) }) else { return false }
+        return ["and", "or", "but", "so", "because", "cause", "the", "a", "an", "to", "with", "for", "of", "about", "my", "your",
+                "is", "are", "was", "if", "that", "then", "um", "uh", "erm", "like", "in", "on", "at", "from", "into", "which",
+                "who", "when", "where", "what", "how", "also", "plus", "than", "as", "it's", "i'm", "and then", "maybe", "please"].contains(last)
+    }
+
     public var pause: TimeInterval {
         get { gate.pause }
         set { gate.pause = newValue }
@@ -146,6 +198,7 @@ public final class VoiceEngine: ObservableObject {
     public init() {
         gate.onSpeechStart = { [weak self] in Task { @MainActor in self?.beginUtterance() } }
         gate.onSilence = { [weak self] in Task { @MainActor in self?.request?.endAudio() } }
+        gate.onBargeIn = { [weak self] in Task { @MainActor in self?.onBargeIn?() } }
         NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.restart() }
         }
@@ -288,6 +341,7 @@ public final class VoiceEngine: ObservableObject {
         if let text, armed || capturing || containsWake(text) || enrollProgress != nil {
             if partial.isEmpty, !armed, !capturing, enrollProgress == nil { onWakeHeard?() }
             partial = text
+            gate.extraPause = Self.soundsUnfinished(text) ? 1.6 : 0
         }
         guard final else { return }
         let heard = text ?? partial

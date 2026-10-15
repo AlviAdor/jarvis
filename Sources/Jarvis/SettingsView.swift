@@ -221,7 +221,8 @@ private struct VoiceTab: View {
                 Toggle("Listen for the wake word", isOn: bind(model, \.wakeWordEnabled))
                 TextField("Wake word", text: bind(model, \.wakeWord))
                 Slider(value: bind(model, \.micThreshold), in: 0.005...0.08) { Text("Needs louder speech") }
-                Slider(value: bind(model, \.responsePause), in: 0.5...2.0) {
+                Toggle("Stop talking when I start speaking", isOn: bind(model, \.bargeIn))
+                Slider(value: bind(model, \.responsePause), in: 0.8...3.0) {
                     Text(String(format: "Reply after a %.1f s pause", model.store.value.responsePause))
                 }
                 Hint("Speech is recognized on this Mac when the on-device model is available. Nothing leaves your Mac until you say the wake word and ask something.")

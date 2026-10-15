@@ -161,6 +161,15 @@ final class AppModel: ObservableObject {
             LocalBrain.shared.prewarm(self.store.value)
         }
         voice.onRejected = { [weak self] in self?.flash("That didn't sound like you, so I ignored it.") }
+        // Talking over Jarvis stops it, and what you say becomes the next request.
+        voice.onBargeIn = { [weak self] in
+            guard let self, self.speaking else { return }
+            self.speaker.stop()
+            // The setup chat captures the answer itself; mid-task, talking only quiets Jarvis.
+            guard !self.needsOnboarding, !self.busy else { return }
+            self.voice.arm()   // not a push-to-talk arm, so "only my voice" still applies
+            self.phase = .listening
+        }
         voice.onEnrolled = { [weak self] ok in
             guard let self else { return }
             if ok { self.store.value.voiceLockEnabled = true }
@@ -246,6 +255,7 @@ final class AppModel: ObservableObject {
         voice.wakeWord = s.wakeWord
         voice.threshold = Float(s.micThreshold)
         voice.pause = s.responsePause
+        voice.bargeInEnabled = s.bargeIn
         voice.lockEnabled = s.voiceLockEnabled
         voice.lockStrictness = s.voiceLockStrictness
         hotKey.set(s.hotkey)

@@ -2,7 +2,7 @@ import Foundation
 
 public struct JarvisSettings: Codable, Equatable {
     /// Bumped when a default changes in a way saved settings should pick up once.
-    public var settingsVersion = 2
+    public var settingsVersion = 3
     public var userName = ""
     public var answerStyle = "brief"     // brief | balanced | detailed
     // About you, so answers fit your life
@@ -31,7 +31,8 @@ public struct JarvisSettings: Codable, Equatable {
     public var wakeWord = "jarvis"
     public var micThreshold = 0.02
     public var speakReplies = true
-    public var responsePause = 0.9     // seconds of silence that end what you're saying
+    public var responsePause = 1.4     // seconds of silence that end what you're saying
+    public var bargeIn = true          // talking over Jarvis stops it
     public var hotkey = "option+space" // option+space | control+space | command+shift+j | off
     public var voiceEngine = "apple"   // apple (on this Mac) | gemini (studio voices, online)
     public var geminiVoice = "Charon"
@@ -122,7 +123,10 @@ public struct JarvisSettings: Codable, Equatable {
         guard let bytes = try? JSONSerialization.data(withJSONObject: merged),
               var s = try? JSONDecoder().decode(JarvisSettings.self, from: bytes) else { return defaults }
         // Version 2: live Mac readings became opt-in.
-        if (saved["settingsVersion"] as? Int ?? 1) < 2 { s.showTelemetry = false }
+        let version = saved["settingsVersion"] as? Int ?? 1
+        if version < 2 { s.showTelemetry = false }
+        // Version 3: give people more time to finish a sentence.
+        if version < 3, s.responsePause < 1.4 { s.responsePause = 1.4 }
         s.settingsVersion = defaults.settingsVersion
         // Gemini 2.x isn't offered to new accounts any more.
         if s.liteModel.hasPrefix("gemini-2") { s.liteModel = defaults.liteModel }
