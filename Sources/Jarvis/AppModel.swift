@@ -662,7 +662,8 @@ final class AppModel: ObservableObject {
             var handedToScreen = false
             while true {
                 phase = m == .screen ? .acting : .thinking
-                let tools = makeTools(s, mcp: mcpTools)
+                let previousAsk = memory.context().last(where: { $0.role == "user" })?.text ?? ""
+                let tools = makeTools(s, mcp: mcpTools, hint: spoken ? "" : text + " " + previousAsk)
                 // Effort decides how strong a model everyday questions get; the usage saver keeps to Lite.
                 var deep: Tier?
                 if m == .chat, s.modelChoice == "auto", !s.usageSaver {
@@ -718,7 +719,7 @@ final class AppModel: ObservableObject {
         comeBack()
     }
 
-    private func makeTools(_ s: JarvisSettings, mcp: [MCPTool]) -> ToolBox {
+    private func makeTools(_ s: JarvisSettings, mcp: [MCPTool], hint: String = "") -> ToolBox {
         let key = store.geminiKey
         let tracker = usage
         var search: (@Sendable (String) async -> String)?
@@ -734,7 +735,8 @@ final class AppModel: ObservableObject {
             onAction: { [weak self] e in Task { @MainActor in self?.apply(e) } },
             mcp: mcp,
             search: search,
-            setSetting: { [weak self] name, value in await self?.changeSetting(name, value) ?? "Couldn't change that." }
+            setSetting: { [weak self] name, value in await self?.changeSetting(name, value) ?? "Couldn't change that." },
+            hint: hint
         )
     }
 
@@ -881,6 +883,21 @@ final class AppModel: ObservableObject {
         }
         guard !store.geminiKey.isEmpty else {
             throw LLMError.other("Claude didn't work and there's no Gemini key. Add one in Settings.")
+        }
+        // Screen work: Gemini's built-in computer use first; the screenshot-and-tools loop if it isn't available.
+        if mode == .screen, s.computerUse, let cu = ComputerUseAgent.pick(s) {
+            let agent = ComputerUseAgent(key: store.geminiKey, model: cu, settings: s, tools: tools, tracker: usage,
+                                         profile: memory.profile(name: s.userName), log: logger)
+            do {
+                return (try await agent.run(task: text, history: chatHistory()), "Gemini computer use")
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let e as LLMError {
+                if case .other = e { throw e }   // missing permissions would stop the fallback too
+                log("Computer use unavailable, using screenshots instead. \(Friendly.message(e))")
+            } catch {
+                log("Computer use unavailable, using screenshots instead.")
+            }
         }
         let agent = GeminiAgent(client: client, chain: chain, settings: s, tools: tools, tracker: usage,
                                 profile: memory.profile(name: s.userName), log: logger)
@@ -1226,6 +1243,23 @@ final class AppModel: ObservableObject {
         guard store.value.colorMode == "adaptive" else { return }
         let strained = snap.cpu > 0.85 || snap.thermal == "serious" || snap.thermal == "critical" || snap.pressure == "critical"
         if strained != systemStrained { withAnimation(.easeInOut(duration: 1.2)) { systemStrained = strained } }
+    }
+
+    // MARK: Connectors
+
+    @Published var nodeStatus: String?
+
+    func installNode() async {
+        nodeStatus = "Starting…"
+        do {
+            try await NodeRuntime.install { [weak self] line in Task { @MainActor in self?.nodeStatus = line } }
+        } catch {
+            nodeStatus = Friendly.message(error)
+            return
+        }
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        nodeStatus = nil
+        flash("Connectors can run now")
     }
 
     // MARK: Ollama

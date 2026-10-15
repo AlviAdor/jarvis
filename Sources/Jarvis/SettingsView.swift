@@ -313,6 +313,16 @@ private struct ToolsTab: View {
 
     var body: some View {
         Form {
+            Section("Operating your Mac") {
+                Toggle("Operate apps directly: buttons, menus, AppleScript, files and the browser", isOn: bind(model, \.appControlEnabled))
+                Picker("Ask before AppleScript", selection: bind(model, \.scriptConfirm)) {
+                    Text("Only when risky").tag("risky")
+                    Text("Every time").tag("always")
+                    Text("Never").tag("never")
+                }
+                Toggle("Use Gemini's computer use for screen tasks", isOn: bind(model, \.computerUse))
+                Hint("Jarvis prefers an app's real controls (found through Accessibility) and AppleScript, which are fast and precise, and looks at the screen only when it has to. Scripts that delete, send, type keystrokes or run shell commands always ask first.")
+            }
             Section("Built in") {
                 Toggle("Web search", isOn: bind(model, \.searchEnabled))
                 Toggle("Read web pages", isOn: bind(model, \.webReadEnabled))
@@ -331,11 +341,24 @@ private struct ToolsTab: View {
                 ))
             }
             Section {
+                HStack {
+                    Image(systemName: NodeRuntime.installed ? "checkmark.circle.fill" : "shippingbox").foregroundStyle(NodeRuntime.installed ? .green : .secondary)
+                    Text(NodeRuntime.installed ? "Connector runtime (Node.js) is installed" : "Connectors need Node.js, the open-source runtime")
+                    Spacer()
+                    if let status = model.nodeStatus {
+                        ProgressView().controlSize(.small)
+                        Text(status).font(.caption).foregroundStyle(.secondary)
+                    } else if !NodeRuntime.installed {
+                        Button("Install connector runtime") { Task { await model.installNode() } }
+                    }
+                }
                 ForEach(Array(model.store.value.mcpServers.enumerated()), id: \.element.id) { i, s in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(s.id).font(.headline)
-                            Text(([s.command] + s.args).joined(separator: " ")).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(s.id.capitalized).font(.headline)
+                            if !s.about.isEmpty { Text(s.about).font(.caption).foregroundStyle(.secondary) }
+                            Text(([s.command] + s.args).joined(separator: " ")).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.tertiary)
+                            ForEach(s.secrets, id: \.self) { name in SecretField(server: s.id, name: name) }
                         }
                         Spacer()
                         Toggle("On", isOn: Binding(get: { model.store.value.mcpServers[i].enabled }, set: { model.store.value.mcpServers[i].enabled = $0 }))
@@ -363,7 +386,7 @@ private struct ToolsTab: View {
                     }
                     .disabled(newID.isEmpty || newCommand.isEmpty)
                 }
-                Hint("Tool servers use the open Model Context Protocol, so Jarvis can use thousands of open-source tools. They need Node.js (npx) or uv (uvx), start the first time they're needed, and ask before each use unless trusted.")
+                Hint("Connectors use the open Model Context Protocol: HubSpot, Notion, Airtable, Slack, GitHub, Postgres and thousands more open-source tools. Access tokens are kept in your Keychain and handed to a connector only when it starts. Each use asks first unless you mark it trusted.")
             } header: { Text("Tool servers (MCP)") }
         }
         .formStyle(.grouped)
@@ -406,6 +429,30 @@ private struct MacTab: View {
         .formStyle(.grouped)
         .onAppear { telemetry.setActive(true) }
         .onDisappear { telemetry.setActive(model.windowVisible && model.store.value.showTelemetry) }
+    }
+}
+
+/// A token for a connector, typed once and kept in the Keychain.
+private struct SecretField: View {
+    let server: String
+    let name: String
+    @State private var value = ""
+    @State private var loaded = false
+
+    var body: some View {
+        SecureField(name, text: $value)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11, design: .monospaced))
+            .onChange(of: value) { _, v in
+                guard loaded else { return }
+                Keychain.set(v.trimmingCharacters(in: .whitespacesAndNewlines), for: MCPServerConfig.secretKey(server, name))
+            }
+            .task {
+                let key = MCPServerConfig.secretKey(server, name)
+                let saved = await Task.detached { Keychain.get(key) ?? "" }.value
+                value = saved
+                loaded = true
+            }
     }
 }
 
