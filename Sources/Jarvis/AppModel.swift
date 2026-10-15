@@ -600,6 +600,12 @@ final class AppModel: ObservableObject {
         if !files.isEmpty, mode == nil { mode = .chat }
         if !files.isEmpty { apply(ActionEvent(title: "Reading \(files.count == 1 ? files[0].name : "\(files.count) files")", detail: files.map(\.name).joined(separator: ", "), state: .done, icon: "paperclip")) }
 
+        // "Ask ChatGPT to…": write a proper prompt (on this Mac when possible), then type it into that assistant.
+        if !spoken, files.isEmpty, s.appControlEnabled, let (target, ask) = AIApps.request(in: text) {
+            await useAIApp(target, ask: ask, original: text, began: began)
+            return
+        }
+
         // Questions about the Mac itself: answered from a live reading, on this Mac when possible.
         if !followUp, Router.isMacStatus(text) {
             let snap = SystemMonitor.shared.snapshot()
@@ -1145,6 +1151,46 @@ final class AppModel: ObservableObject {
         memory.context(limit: store.value.usageSaver ? 4 : 10).map { t in
             (t.role, t.role == "assistant" && t.text.count > 700 ? String(t.text.prefix(700)) + "…" : t.text)
         }
+    }
+
+    // MARK: Other AI assistants
+
+    /// Turns spoken words into a well-formed prompt: the local model first, Gemini Lite next, the words as said last.
+    private func craftPrompt(_ ask: String) async -> String {
+        let s = store.value
+        if let local = await LocalBrain.shared.complete(ask, instructions: AIApps.promptInstructions, settings: s), local.count > 8 {
+            return local
+        }
+        if !store.geminiKey.isEmpty, !s.usageSaver, QuotaBook.shared.usable(s.liteModel),
+           let r = try? await GeminiClient(apiKey: store.geminiKey).generate(
+               model: s.liteModel, system: AIApps.promptInstructions, contents: [["role": "user", "parts": [["text": ask]]]],
+               maxTokens: 600, thinking: GeminiAgentThinking.minimal(s.liteModel)) {
+            usage.add(r.usage)
+            let t = r.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.count > 8 { return t }
+        }
+        return ask.prefix(1).uppercased() + ask.dropFirst()
+    }
+
+    private func useAIApp(_ target: AIApps.Target, ask: String, original: String, began: Date) async {
+        let s = store.value
+        let lower = original.lowercased()
+        let readBack = ["read", "tell me what", "what does it say", "what it says", "and answer", "get the answer", "let me know"].contains { lower.contains($0) }
+        let writeId = UUID()
+        apply(ActionEvent(id: writeId, title: "Writing a prompt for \(target.name)", state: .running, icon: "text.bubble"))
+        let prompt = await craftPrompt(ask)
+        apply(ActionEvent(id: writeId, title: "Wrote a prompt for \(target.name)", detail: prompt, state: .done, icon: "text.bubble"))
+        phase = .acting
+        stepAside()
+        let tools = makeTools(s, mcp: [], hint: original)
+        let screen = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
+        let r = await tools.execute("ai_app", ["app": target.id, "prompt": prompt, "send": true, "read_reply": readBack], screen: screen)
+        var answerText = r.text
+        if readBack, let range = r.text.range(of: "\(target.name) replied:\n") {
+            answerText = String(r.text[range.upperBound...])
+        }
+        record(original, answerText, source: "\(target.name) · \(Self.elapsed(began))", mode: "chat")
+        comeBack()
     }
 
     // MARK: Streaming
