@@ -60,6 +60,11 @@ public final class GeminiClient: @unchecked Sendable {
         ]
         if !tools.isEmpty { body["tools"] = tools }
 
+        // Don't spend a request on a model Google has already said no to; the caller moves on.
+        if !QuotaBook.shared.usable(model) {
+            let why = QuotaBook.shared.reason(model).map { QuotaBook.describe(model, $0.kind, $0.until) } ?? "resting"
+            throw LLMError.http(429, #"{"error":{"message":"\#(why)","status":"RESOURCE_EXHAUSTED"},"jarvis":"skipped"}"#)
+        }
         var delay: UInt64 = 1_000_000_000
         var attempts = 0
         while true {
@@ -69,6 +74,17 @@ public final class GeminiClient: @unchecked Sendable {
             let text = String(data: data, encoding: .utf8) ?? ""
 
             if code == 200 { return try Self.parse(data) }
+            // Quota: wait only as long as Google asks, once, and only for a short per-minute pause.
+            if code == 429 {
+                let r = QuotaBook.shared.note(model, body: text)
+                if r.kind == .perMinute, let wait = r.retryAfter, wait <= 12, attempts == 0 {
+                    attempts += 1
+                    try await Task.sleep(nanoseconds: UInt64((wait + 0.5) * 1_000_000_000))
+                    _ = QuotaBook.shared.usable(model, now: Date().addingTimeInterval(3600))   // lift the pause for this retry
+                    continue
+                }
+                throw LLMError.http(code, text)
+            }
 
             // Some models reject thinkingConfig; drop it and try again.
             if code == 400, text.lowercased().contains("thinking"), var g = body["generationConfig"] as? [String: Any],
@@ -78,7 +94,7 @@ public final class GeminiClient: @unchecked Sendable {
                 continue
             }
             attempts += 1
-            if [429, 500, 503].contains(code), attempts < 3 {
+            if [500, 503].contains(code), attempts < 2 {
                 try await Task.sleep(nanoseconds: delay)
                 delay *= 2
                 continue

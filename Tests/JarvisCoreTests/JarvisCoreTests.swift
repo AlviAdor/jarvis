@@ -75,7 +75,7 @@ final class ModelTests: XCTestCase {
     func testErrorsAreFriendlyAndNeverLeakKeys() {
         let e = LLMError.http(429, #"{"error":{"message":"Quota exceeded for AIzaSyA1234567890abcdefghijklmn"}}"#)
         let m = Friendly.message(e)
-        XCTAssertTrue(m.contains("Rate limit"))
+        XCTAssertTrue(m.contains("limiting requests"))
         XCTAssertTrue(m.contains("Quota exceeded"))
         XCTAssertFalse(m.contains("AIza"))
         XCTAssertEqual(Redact.secrets("key sk-ant-abcdefghijklmnop here"), "key [key] here")

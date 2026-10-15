@@ -101,13 +101,14 @@ public struct Router: Sendable {
         }
     }
 
-    /// Model ids to try in order; later ones are cheaper fallbacks for rate limits.
+    /// Model ids to try in order. Each tier's chosen model comes first, then up to two other models of the
+    /// same tier (each has its own free allowance), then the lighter tiers.
     public func chain(for mode: Mode, settings: JarvisSettings, from override: Tier? = nil) -> [String] {
         var out: [String] = []
         var t: Tier? = override ?? tier(for: mode, settings: settings)
         while let cur = t {
-            let id = settings.modelID(cur)
-            if !out.contains(id) { out.append(id) }
+            let ids = [settings.modelID(cur)] + ModelPicker.ranked(cur, in: settings.knownModels).prefix(2)
+            for id in ids where !out.contains(id) { out.append(id) }
             t = cur.fallback
         }
         return out

@@ -20,6 +20,7 @@ public struct JarvisSettings: Codable, Equatable {
     public var claudeFlashModel = "claude-sonnet-5-5"
     public var claudeProModel = "claude-opus-5-5"
     public var dailyRequestCap = 500
+    public var knownModels: [String] = []   // what this key can use, from Google's model list
     public var maxSteps = 25
     // Local model for quick answers
     public var localEngine = "auto"    // auto | apple | ollama | off
@@ -73,6 +74,7 @@ public struct JarvisSettings: Codable, Equatable {
     public var quickPanel = true         // the shortcut opens a floating ask bar
     public var keepHistory = true        // show earlier answers from this session
     // Look
+    public var orbStyle = "sphere"       // sphere | nucleus
     public var colorMode = "adaptive"    // adaptive: shifts from the light to the heavy colour as work gets harder | fixed
     public var heavyAccentHex = "#FF3B3B"
     public var accentHex = "#3DD6F5"

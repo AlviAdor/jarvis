@@ -24,6 +24,19 @@ public enum Redact {
 }
 
 public enum Friendly {
+    /// Every model Jarvis could use is out of free requests: say why and when it clears.
+    public static func allResting(_ models: [String]) -> String {
+        let reasons = models.compactMap { m in QuotaBook.shared.reason(m).map { (m, $0.kind, $0.until) } }
+        guard let soonest = reasons.min(by: { $0.2 < $1.2 }) else {
+            return "Gemini is limiting requests right now. Give it a minute and ask again."
+        }
+        let t = soonest.2.formatted(date: .omitted, time: .shortened)
+        if reasons.allSatisfy({ $0.1 == .perMinute || $0.1 == .unknown }) {
+            return "Gemini's free tier only allows a few requests a minute, and I've hit that. I can go again at \(t)."
+        }
+        return "Gemini's free requests for today are used up on every model I can use. They reset at \(t). Quick questions still work on this Mac, and adding billing in Google AI Studio removes the limit."
+    }
+
     /// Turns an API failure into one plain sentence.
     public static func message(_ error: Error) -> String {
         if case LLMError.http(let code, let body) = error {
@@ -38,7 +51,14 @@ public enum Friendly {
             case 400: hint = "The request was rejected"
             case 401, 403: hint = "The key was refused"
             case 404: hint = "That model isn't available to this key"
-            case 429: hint = "Rate limit or quota reached"
+            case 429:
+                let r = QuotaBook.parse(body)
+                switch r.kind {
+                case .noFreeTier: return "That Gemini model isn't included in the free tier on this key, so Jarvis will use another one."
+                case .perDay: return "Today's free Gemini requests for that model are used up. They reset at \(QuotaBook.nextPacificMidnight().formatted(date: .omitted, time: .shortened))."
+                case .perMinute: return "Gemini's free tier only allows a few requests a minute. Try again in \(Int(r.retryAfter ?? 30)) seconds."
+                case .unknown: hint = "Gemini is limiting requests"
+                }
             case 500...599: hint = "The service is having trouble"
             default: hint = "Request failed (\(code))"
             }
@@ -49,6 +69,17 @@ public enum Friendly {
 }
 
 public enum ModelPicker {
+    /// Every usable model for a tier, newest first, so each can stand in for the others.
+    public static func ranked(_ tier: Tier, in models: [String]) -> [String] {
+        var left = models
+        var out: [String] = []
+        while let best = newest(tier, in: left) {
+            out.append(best)
+            left.removeAll { $0 == best }
+        }
+        return out
+    }
+
     private static let skip = ["image", "tts", "live", "audio", "embedding", "robotics", "computer-use", "exp", "latest", "customtools", "thinking"]
 
     /// Newest usable model for a tier from the account's own model list.
