@@ -39,6 +39,7 @@ public final class LocalBrain: @unchecked Sendable {
     If you are not certain a fact is correct, reply ESCALATE_WEB.
     When live data about this Mac is included, answer questions about the Mac from it directly.
     Use what you know about the user and the conversation so far; a short follow-up continues the previous topic.
+    You help with any topic; what you know about the user never limits that. Reply in the language the user used.
     """
 
     private let lock = NSLock()
@@ -219,10 +220,18 @@ public final class LocalBrain: @unchecked Sendable {
     // MARK: Answering
 
     /// Streams the growing answer text. Returns nil when no local model is available.
+    /// Instructions for when the cloud can't be reached: answer everything as well as possible, never hand off.
+    public static let soloInstructions = """
+    You are Jarvis, a capable voice assistant on the user's Mac. The online models can't be reached right now, so answer every request yourself as well as you can, in one to four short spoken sentences, plain text, no markdown.
+    If something needs live information you don't have, give your best general answer and say briefly that you couldn't check online.
+    Help with any topic, and reply in the language the user used.
+    """
+
     public func stream(_ prompt: String, history: [(role: String, text: String)], settings s: JarvisSettings,
-                       context: String? = nil) async -> (AsyncThrowingStream<String, Error>, Engine)? {
+                       context: String? = nil, solo: Bool = false) async -> (AsyncThrowingStream<String, Error>, Engine)? {
         guard let (engine, model) = await resolve(s) else { return nil }
         let live = context.map { "\($0)\n\n" } ?? ""
+        let rules = solo ? Self.soloInstructions : Self.instructions
         switch engine {
         case .apple:
             #if canImport(FoundationModels)
@@ -230,12 +239,12 @@ public final class LocalBrain: @unchecked Sendable {
                 var text = live
                 for h in history.suffix(10) { text += (h.role == "user" ? "User: " : "Jarvis: ") + h.text + "\n" }
                 text += text.isEmpty ? prompt : "User: \(prompt)"
-                return (appleStream(text), .apple)
+                return (appleStream(text, instructions: rules), .apple)
             }
             #endif
             return nil
         case .ollama:
-            var messages: [[String: String]] = [["role": "system", "content": Self.instructions + (live.isEmpty ? "" : "\n\n" + live)]]
+            var messages: [[String: String]] = [["role": "system", "content": rules + (live.isEmpty ? "" : "\n\n" + live)]]
             for h in history.suffix(10) { messages.append(["role": h.role == "user" ? "user" : "assistant", "content": h.text]) }
             messages.append(["role": "user", "content": prompt])
             return (ollamaStream(model: model, messages: messages), .ollama)
@@ -244,9 +253,10 @@ public final class LocalBrain: @unchecked Sendable {
 
     #if canImport(FoundationModels)
     @available(macOS 26.0, *)
-    private func appleStream(_ prompt: String) -> AsyncThrowingStream<String, Error> {
+    private func appleStream(_ prompt: String, instructions: String) -> AsyncThrowingStream<String, Error> {
         let session = lock.withLock { () -> LanguageModelSession in
-            let s = (prepared as? LanguageModelSession) ?? LanguageModelSession(instructions: Self.instructions)
+            let warm = instructions == Self.instructions ? prepared as? LanguageModelSession : nil
+            let s = warm ?? LanguageModelSession(instructions: instructions)
             prepared = nil
             return s
         }

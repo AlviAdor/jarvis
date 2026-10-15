@@ -34,6 +34,23 @@ final class AudioGate: @unchecked Sendable {
     /// How loud Jarvis's own voice is in the mic, learned while it speaks.
     private var echo: Float = 0
     private var bargeRun = 0
+    /// The audio of the request being heard, so it can be sent on when it isn't English.
+    private var recording: [AVAudioPCMBuffer] = []
+
+    static func copy(_ b: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let c = AVAudioPCMBuffer(pcmFormat: b.format, frameCapacity: b.frameLength), let src = b.floatChannelData,
+              let dst = c.floatChannelData else { return nil }
+        c.frameLength = b.frameLength
+        for ch in 0..<Int(b.format.channelCount) { dst[ch].update(from: src[ch], count: Int(b.frameLength)) }
+        return c
+    }
+
+    func takeRecording() -> [AVAudioPCMBuffer] {
+        lock.lock(); defer { lock.unlock() }
+        let r = recording
+        recording = []
+        return r
+    }
     private var speakingSince = Date()
 
     static func rms(_ b: AVAudioPCMBuffer) -> Float {
@@ -56,12 +73,13 @@ final class AudioGate: @unchecked Sendable {
         lock.lock()
         if let req = request {
             req.append(buffer)
+            if recording.count < 400, let c = Self.copy(buffer) { recording.append(c) }
             latestLevel = level
             // Compared with the room's own background level, so a soft voice still counts as speech.
             let voiced = level > max(threshold, noiseFloor * 2.5)
             features.add(buffer, loudEnough: level > max(0.003, noiseFloor * 2.5))
             if voiced { lastLoud = Date() }
-            let quiet = Date().timeIntervalSince(lastLoud) > pause + extraPause
+            let quiet = Date().timeIntervalSince(lastLoud) > max(0.7, pause + extraPause)
             let tooLong = Date().timeIntervalSince(began) > 25
             if (quiet || tooLong) && !ended {
                 ended = true
@@ -112,6 +130,7 @@ final class AudioGate: @unchecked Sendable {
         lock.lock()
         features.reset()
         for b in preroll { req.append(b) }
+        recording = preroll.compactMap { Self.copy($0) }
         preroll.removeAll()
         request = req
         lastLoud = Date()
@@ -386,15 +405,19 @@ public final class VoiceEngine: ObservableObject {
         task = recognizer.recognitionTask(with: req) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
             let final = (result?.isFinal ?? false) || error != nil
-            Task { @MainActor in self?.update(text, final: final) }
+            let segs = result?.bestTranscription.segments ?? []
+            let confidence = segs.isEmpty ? Float(0) : segs.map(\.confidence).reduce(0, +) / Float(segs.count)
+            Task { @MainActor in self?.update(text, final: final, confidence: confidence) }
         }
     }
 
-    private func update(_ text: String?, final: Bool) {
+    private func update(_ text: String?, final: Bool, confidence: Float = 0) {
         if let text, armed || capturing || containsWake(text) || enrollProgress != nil {
             if partial.isEmpty, !armed, !capturing, enrollProgress == nil { onWakeHeard?() }
             partial = text
-            gate.extraPause = Self.soundsUnfinished(text) ? 1.6 : 0
+            // A sentence that sounds finished ends sooner; one that trails off gets more time.
+            let t = text.trimmingCharacters(in: .whitespaces)
+            gate.extraPause = Self.soundsUnfinished(text) ? 1.6 : (t.hasSuffix("?") || t.hasSuffix(".") || t.hasSuffix("!")) ? -0.6 : 0
         }
         guard final else { return }
         let heard = text ?? partial
@@ -404,6 +427,9 @@ public final class VoiceEngine: ObservableObject {
         levelTimer?.invalidate()
         level = 0
         let vector = gate.takeVector()
+        let audio = gate.takeRecording()
+        lastConfidence = confidence
+        lastAudio = audio
         gate.detach()
         if capturing {
             capturing = false
@@ -459,6 +485,41 @@ public final class VoiceEngine: ObservableObject {
         return String(t[r.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " ,.!?"))
     }
 
+    /// How sure the recogniser was about the last request (0 when it didn't say), and that request's audio.
+    public private(set) var lastConfidence: Float = 0
+    private var lastAudio: [AVAudioPCMBuffer] = []
+
+    /// The last request as a 16 kHz mono WAV, for a model that understands speech in any language.
+    public func lastRecordingWAV() -> Data? { Self.wav(from: lastAudio) }
+
+    nonisolated public static func wav(from buffers: [AVAudioPCMBuffer], rate: Double = 16_000) -> Data? {
+        guard let first = buffers.first,
+              let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: rate, channels: 1, interleaved: true),
+              let conv = AVAudioConverter(from: first.format, to: target) else { return nil }
+        var pcm = Data()
+        var index = 0
+        let total = buffers.reduce(0) { $0 + Int($1.frameLength) }
+        let capacity = AVAudioFrameCount(Double(total) * rate / first.format.sampleRate) + 1024
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+        var err: NSError?
+        conv.convert(to: out, error: &err) { _, status in
+            guard index < buffers.count else { status.pointee = .endOfStream; return nil }
+            status.pointee = .haveData
+            defer { index += 1 }
+            return buffers[index]
+        }
+        guard err == nil, let ch = out.int16ChannelData, out.frameLength > 0 else { return nil }
+        pcm.append(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
+        var header = Data()
+        func u32(_ v: UInt32) { var x = v.littleEndian; header.append(Data(bytes: &x, count: 4)) }
+        func u16(_ v: UInt16) { var x = v.littleEndian; header.append(Data(bytes: &x, count: 2)) }
+        header.append(contentsOf: Array("RIFF".utf8)); u32(UInt32(36 + pcm.count))
+        header.append(contentsOf: Array("WAVEfmt ".utf8)); u32(16); u16(1); u16(1)
+        u32(UInt32(rate)); u32(UInt32(rate) * 2); u16(2); u16(16)
+        header.append(contentsOf: Array("data".utf8)); u32(UInt32(pcm.count))
+        return header + pcm
+    }
+
     /// Called when the user says only the wake word, so Jarvis can answer "Yes?".
     public var onWakeOnly: (() -> Void)?
 
@@ -489,6 +550,9 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     public var onSpeakingChange: ((Bool) -> Void)?
     /// Called with a reason when the Gemini voice can't be used and the Mac voice takes over.
     public var onFallback: ((String) -> Void)?
+    /// Called with a language code when no Mac voice can speak it.
+    public var onMissingVoice: ((String) -> Void)?
+    private var lastLanguage: String?
     public var geminiKey: () -> String = { "" }
     /// Short phrases already spoken in the Gemini voice, kept so greetings play instantly and cost nothing.
     private static let cacheDir: URL = {
@@ -514,12 +578,25 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     }
 
     /// Speaks with the voice chosen in settings. The Gemini voice falls back to the Mac's voice on any error.
+    /// Called each time a reply is sent to Gemini to be spoken, so the request is counted.
+    public var onCloudUse: (() -> Void)?
+
     public func say(_ text: String, settings s: JarvisSettings, queue: Bool = true) {
+        if s.usageSaver {
+            sayLocal(text, settings: s, queue: queue)
+            return
+        }
         if s.voiceEngine == "gemini", !geminiKey().isEmpty {
             sayGemini(text, s)
-        } else {
-            sayLocal(text, settings: s, queue: queue)
+            return
         }
+        // A language no Mac voice on this Mac can speak: Gemini's voice speaks almost any language.
+        if let lang = Language.detect(text), Language.voice(for: lang) == nil, !geminiKey().isEmpty,
+           QuotaBook.shared.usable(s.ttsModel) {
+            sayGemini(text, s)
+            return
+        }
+        sayLocal(text, settings: s, queue: queue)
     }
 
     /// Always the Mac's own voice: instant, offline, used for streamed sentences and short step narration.
@@ -529,7 +606,15 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         u.rate = Float(s.voiceRate)
         u.pitchMultiplier = Float(s.voicePitch)
         u.volume = Float(s.voiceVolume)
-        if !s.voiceID.isEmpty, let v = AVSpeechSynthesisVoice(identifier: s.voiceID) { u.voice = v }
+        // Speak each language in a voice that knows it; the chosen voice is used whenever it fits.
+        let lang = Language.detect(text) ?? lastLanguage
+        if let lang { lastLanguage = lang }
+        let chosen = s.voiceID.isEmpty ? nil : AVSpeechSynthesisVoice(identifier: s.voiceID)
+        if let lang, !(chosen?.language.lowercased().hasPrefix(lang.lowercased()) ?? lang.hasPrefix("en")) {
+            if let v = Language.voice(for: lang) { u.voice = v } else { onMissingVoice?(lang) }
+        } else if let chosen {
+            u.voice = chosen
+        }
         onSpeakingChange?(true)
         synth.speak(u)
     }
@@ -546,6 +631,7 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
             p.play()
             return
         }
+        onCloudUse?()
         fetch = Task { [weak self] in
             do {
                 let wav = try await GeminiVoice.synthesize(text, voice: s.geminiVoice, style: s.voiceStyle, model: s.ttsModel, key: key, known: self?.knownModels() ?? [])

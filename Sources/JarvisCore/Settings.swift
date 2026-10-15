@@ -20,6 +20,33 @@ public struct JarvisSettings: Codable, Equatable {
     public var claudeFlashModel = "claude-sonnet-5-5"
     public var claudeProModel = "claude-opus-5-5"
     public var dailyRequestCap = 500
+    /// How hard Jarvis works on each request: low | balanced | high | max.
+    public var effort = "balanced"
+    /// Stretch the free allowance: on-device first, Lite models only, the Mac voice, no background requests.
+    public var usageSaver = false
+
+    /// Effort as used for a request; the usage saver always keeps it low.
+    public var effectiveEffort: String { usageSaver ? "low" : effort }
+
+    /// How much room an answer gets, relative to normal.
+    public var tokenScale: Double {
+        switch effectiveEffort {
+        case "low": return 0.5
+        case "high": return 2
+        case "max": return 4
+        default: return 1
+        }
+    }
+
+    /// Most tool steps for a job that doesn't use the screen.
+    public var toolSteps: Int {
+        switch effectiveEffort {
+        case "low": return 6
+        case "high": return 16
+        case "max": return 24
+        default: return 12
+        }
+    }
     public var knownModels: [String] = []   // what this key can use, from Google's model list
     public var maxSteps = 25
     // Local model for quick answers
@@ -30,6 +57,7 @@ public struct JarvisSettings: Codable, Equatable {
     public var wakeWordEnabled = true
     public var wakeWord = "jarvis"
     public var micThreshold = 0.006    // the room's own noise level is added on top of this
+    public var anyLanguage = true        // speech that isn't confident English goes to Gemini, which understands most languages
     public var answerWhenCalled = true   // "Yes, Alvi?" when you say just the wake word
     public var greetOnLaunch = true
     public var speakReplies = true
@@ -92,7 +120,7 @@ public struct JarvisSettings: Codable, Equatable {
         var parts: [String] = []
         if !aboutWork.isEmpty { parts.append("Does: \(aboutWork).") }
         if !aboutPlace.isEmpty { parts.append("Based in \(aboutPlace).") }
-        if !aboutFocus.isEmpty { parts.append("Mostly wants help with: \(aboutFocus.joined(separator: ", ")).") }
+        if !aboutFocus.isEmpty { parts.append("Interests: \(aboutFocus.joined(separator: ", ")).") }
         if !aboutNotes.isEmpty { parts.append(aboutNotes) }
         return parts.joined(separator: " ")
     }

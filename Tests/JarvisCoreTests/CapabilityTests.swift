@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import ImageIO
+import AVFoundation
 @testable import JarvisCore
 
 final class RoutingTests: XCTestCase {
@@ -257,7 +258,7 @@ final class MemoryTests: XCTestCase {
         s.aboutWork = "CS student at AIUB"
         s.aboutPlace = "Dhaka"
         s.aboutFocus = ["Studies", "Coding"]
-        XCTAssertEqual(s.aboutText, "Does: CS student at AIUB. Based in Dhaka. Mostly wants help with: Studies, Coding.")
+        XCTAssertEqual(s.aboutText, "Does: CS student at AIUB. Based in Dhaka. Interests: Studies, Coding.")
     }
 
     func testOldSettingsHideTelemetryOnce() throws {
@@ -477,5 +478,55 @@ final class VoiceUpgradeTests: XCTestCase {
         let s = JarvisSettings.load(from: old)
         XCTAssertEqual(s.micThreshold, 0.006)
         XCTAssertTrue(s.answerWhenCalled)
+    }
+}
+
+final class LanguageAndEffortTests: XCTestCase {
+    func testLanguagesAreDetected() {
+        XCTAssertEqual(Language.detect("What's the weather like in Dhaka today?"), "en")
+        XCTAssertEqual(Language.detect("আজকে ঢাকার আবহাওয়া কেমন?"), "bn")
+        XCTAssertEqual(Language.detect("आज मौसम कैसा है?"), "hi")
+        XCTAssertNil(Language.detect("ok"))
+        XCTAssertFalse(Language.isEnglish("¿Qué hora es en Madrid ahora mismo?"))
+    }
+
+    func testHeardLineIsSplitFromTheAnswer() {
+        let r = Language.splitHeard("Heard: আজকের তারিখ কত?\nআজ ১৬ অক্টোবর।")
+        XCTAssertEqual(r.heard, "আজকের তারিখ কত?")
+        XCTAssertEqual(r.rest, "আজ ১৬ অক্টোবর।")
+        XCTAssertNil(Language.splitHeard("Just an answer.").heard)
+    }
+
+    func testSpeechBecomesACompactWAV() throws {
+        let fmt = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 48_000)!
+        buf.frameLength = 48_000
+        for i in 0..<48_000 { buf.floatChannelData![0][i] = sin(Float(i) * 0.05) * 0.3 }
+        let wav = try XCTUnwrap(VoiceEngine.wav(from: [buf]))
+        XCTAssertEqual(String(decoding: wav.prefix(4), as: UTF8.self), "RIFF")
+        XCTAssertEqual(String(decoding: wav[8..<12], as: UTF8.self), "WAVE")
+        XCTAssertEqual(wav.count, 44 + 16_000 * 2, accuracy: 400)   // one second at 16 kHz, 16-bit mono
+    }
+
+    func testEffortShapesThinkingAndScope() {
+        var s = JarvisSettings()
+        XCTAssertEqual(GeminiAgent.thinking(for: "gemini-3.8-flash", mode: .chat, effort: "low"), .level("low"))
+        XCTAssertEqual(GeminiAgent.thinking(for: "gemini-3.8-flash", mode: .chat, effort: "max"), .level("high"))
+        XCTAssertEqual(GeminiAgent.thinking(for: "gemini-3.8-flash", mode: .chat), .level("low"))
+        s.effort = "max"
+        XCTAssertEqual(s.toolSteps, 24)
+        XCTAssertEqual(s.tokenScale, 4)
+        s.usageSaver = true
+        XCTAssertEqual(s.effectiveEffort, "low")
+        XCTAssertEqual(s.toolSteps, 6)
+        s.knownModels = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+        XCTAssertFalse(Router().chain(for: .chat, settings: s).contains("gemini-3.8-flash"))   // the saver never steps up
+        XCTAssertEqual(Router().tier(for: .hard, settings: s), .flash)
+    }
+
+    func testRealQuestionsAreRecognised() {
+        XCTAssertTrue(Router.isSubstantive("why is the sky blue"))
+        XCTAssertTrue(Router.isSubstantive("help me plan a three day trip to Cox's Bazar"))
+        XCTAssertFalse(Router.isSubstantive("hi there"))
     }
 }

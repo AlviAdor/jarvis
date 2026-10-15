@@ -94,6 +94,11 @@ public struct Attachment: Identifiable, Sendable, Equatable {
         throw LoadError.unsupported(name)
     }
 
+    /// A spoken request, for models that understand speech directly.
+    public static func speech(_ wav: Data) -> Attachment {
+        Attachment(name: "Spoken request.wav", kind: .audio, mime: "audio/wav", data: wav)
+    }
+
     /// Any image becomes a JPEG no larger than 2048 pixels, which every provider accepts.
     public static func image(_ data: Data, name: String) throws -> Attachment {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { throw LoadError.unreadable(name) }

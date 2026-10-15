@@ -9,6 +9,8 @@ public final class GeminiAgent: @unchecked Sendable {
     private let tracker: UsageTracker
     private let profile: String
     private let log: @Sendable (String) -> Void
+    /// Gets the growing answer as it streams in.
+    public var onText: (@Sendable (String) -> Void)?
 
     public init(client: GeminiClient, chain: [String], settings: JarvisSettings, tools: ToolBox,
                 tracker: UsageTracker, profile: String, log: @escaping @Sendable (String) -> Void) {
@@ -22,19 +24,35 @@ public final class GeminiAgent: @unchecked Sendable {
     }
 
     /// Gemini 2.x wants a token budget, 3.x a level. Pro models always think, so leave them on their default.
-    public static func thinking(for model: String, mode: Mode) -> Thinking? {
-        if model.contains("pro") { return nil }
+    /// How much the model thinks before answering: more for harder modes and higher effort, as little as
+    /// possible at low effort, where thinking tokens would only add time and quota.
+    public static func thinking(for model: String, mode: Mode, effort: String = "balanced") -> Thinking? {
+        if model.contains("pro") { return effort == "low" ? .level("low") : nil }
         if model.hasPrefix("gemini-2") {
+            let base: Int
             switch mode {
-            case .chat, .web: return .budget(0)
-            case .screen: return .budget(512)
-            case .hard: return .budget(2048)
+            case .chat, .web: base = 0
+            case .screen: base = 512
+            case .hard: base = 2048
+            }
+            switch effort {
+            case "low": return .budget(0)
+            case "high": return .budget(max(base * 2, 1024))
+            case "max": return .budget(max(base * 4, 4096))
+            default: return .budget(base)
             }
         }
-        switch mode {
-        case .chat, .web: return .level(model.contains("lite") ? "minimal" : "low")
-        case .screen: return .level("low")
-        case .hard: return .level("high")
+        let lite = model.contains("lite")
+        switch effort {
+        case "low": return .level(lite ? "minimal" : "low")
+        case "high": return .level(mode == .hard ? "high" : "medium")
+        case "max": return .level("high")
+        default:
+            switch mode {
+            case .chat, .web: return .level(lite ? "minimal" : "low")
+            case .screen: return .level("low")
+            case .hard: return .level("high")
+            }
         }
     }
 
@@ -51,9 +69,15 @@ public final class GeminiAgent: @unchecked Sendable {
         if usable.isEmpty { throw LLMError.other(Friendly.allResting(chain)) }
         for model in usable {
             do {
-                let r = try await client.generate(model: model, system: jarvisSystemPrompt(mode: mode, settings: settings, profile: profile),
-                                                  contents: contents, tools: tools, maxTokens: maxTokens,
-                                                  thinking: Self.thinking(for: model, mode: mode))
+                let system = jarvisSystemPrompt(mode: mode, settings: settings, profile: profile)
+                let think = Self.thinking(for: model, mode: mode, effort: settings.effectiveEffort)
+                let maxTokens = Int(Double(maxTokens) * settings.tokenScale)
+                let r: GeminiResponse
+                if let show = onText {
+                    r = try await client.stream(model: model, system: system, contents: contents, tools: tools, maxTokens: maxTokens, thinking: think, onText: show)
+                } else {
+                    r = try await client.generate(model: model, system: system, contents: contents, tools: tools, maxTokens: maxTokens, thinking: think)
+                }
                 await tracker.add(r.usage)
                 return r
             } catch LLMError.http(let code, let body) where [403, 404, 429, 500, 503].contains(code) {
@@ -110,7 +134,7 @@ public final class GeminiAgent: @unchecked Sendable {
 
         let decls = tools.declarations(screen: screenMode)
         let toolParam: [[String: Any]] = [["functionDeclarations": decls]]
-        let limit = screenMode ? settings.maxSteps : 12
+        let limit = screenMode ? settings.maxSteps : settings.toolSteps
         var imagesInside = true   // Gemini 3 wants screenshots inside the function response
 
         for _ in 1...limit {
@@ -244,6 +268,9 @@ func jarvisSystemPrompt(mode: Mode, settings: JarvisSettings, profile: String) -
     Your replies are spoken aloud and also shown as a short card. Give only the answer or the result the user needs: no greetings, no restating the question. Write plain sentences; use markdown only for code (in fenced blocks), tables or lists the user asks for. \(answerLength(settings.answerStyle))
     When the user attaches files, images, PDFs, audio or video, read them carefully and answer about them directly.
     The conversation so far is included: treat short follow-ups ("and tomorrow?", "send it to her", "do the same for Desktop") as continuing it.
+    You are a general assistant with broad, expert knowledge in every field: science, maths, technology, history, health, law, money, language, writing, cooking, travel, relationships, culture and everyday life. Help with anything the user asks, on any topic. What you know about the user is there to make answers personal; it never limits what you help with, so never say you're only for certain subjects.
+    Be genuinely smart: get facts and numbers right, reason carefully through hard questions, give specific, practical answers, and say plainly when you're unsure. Use web_search for anything current, local or that you can't state with confidence.
+    Always reply in the language of the user's latest message (or of their spoken request), unless they ask for another language.
     You can act, not just talk: use tools for the user's apps, files, calendar, reminders, notes, messages, mail, music, settings, the Mac's health and disk space, the web, and the screen. Chain several tools when a job needs it, and finish the job rather than describing how the user could do it.
     The user watches every action you take, so act directly and don't narrate what the screen already shows.
     For disk space: look first (disk report, large_files, old_downloads, duplicates), explain what's safe, then clean only what the user agrees to.

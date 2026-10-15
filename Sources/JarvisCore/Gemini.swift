@@ -97,6 +97,69 @@ public final class GeminiClient: @unchecked Sendable {
         }
     }
 
+    /// Same request, streamed: `onText` gets the growing answer as Gemini writes it, so it can be shown
+    /// (and spoken) before the whole reply is done. Anything unusual falls back to the plain request.
+    public func stream(model: String, system: String, contents: [[String: Any]], tools: [[String: Any]] = [],
+                       maxTokens: Int = 1024, thinking: Thinking? = nil,
+                       onText: @escaping @Sendable (String) -> Void) async throws -> GeminiResponse {
+        if !QuotaBook.shared.usable(model) {
+            return try await generate(model: model, system: system, contents: contents, tools: tools, maxTokens: maxTokens, thinking: thinking)
+        }
+        var gen: [String: Any] = ["maxOutputTokens": maxTokens]
+        if let thinking { gen["thinkingConfig"] = thinking.json }
+        var body: [String: Any] = ["systemInstruction": ["parts": [["text": system]]], "contents": contents, "generationConfig": gen]
+        if !tools.isEmpty { body["tools"] = tools }
+        var req = try request("/models/\(model):streamGenerateContent?alt=sse", body: body)
+        req.timeoutInterval = 120
+        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 else {
+            var text = ""
+            for try await line in bytes.lines { text += line; if text.count > 4000 { break } }
+            if code == 429 {
+                QuotaBook.shared.note(model, body: text)
+                throw LLMError.http(code, text)
+            }
+            // Let the plain request deal with retries and settings the model doesn't take.
+            return try await generate(model: model, system: system, contents: contents, tools: tools, maxTokens: maxTokens, thinking: thinking)
+        }
+        var parts: [[String: Any]] = []
+        var shown = ""
+        var usage = Usage()
+        var queries: [String] = []
+        var sources: [(title: String, url: String)] = []
+        var blocked = ""
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard line.hasPrefix("data:"),
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(5).utf8)) as? [String: Any] else { continue }
+            if let meta = obj["usageMetadata"] as? [String: Any] {
+                usage = Usage(input: meta["promptTokenCount"] as? Int ?? 0, output: meta["candidatesTokenCount"] as? Int ?? 0)
+            }
+            if let why = (obj["promptFeedback"] as? [String: Any])?["blockReason"] as? String { blocked = why }
+            guard let cand = (obj["candidates"] as? [[String: Any]])?.first else { continue }
+            let new = (cand["content"] as? [String: Any])?["parts"] as? [[String: Any]] ?? []
+            parts += new
+            for p in new where p["thought"] as? Bool != true {
+                if let t = p["text"] as? String { shown += t }
+            }
+            if !new.isEmpty, !shown.isEmpty { onText(shown) }
+            if let gm = cand["groundingMetadata"] as? [String: Any] {
+                queries = gm["webSearchQueries"] as? [String] ?? queries
+                let found: [(title: String, url: String)] = (gm["groundingChunks"] as? [[String: Any]] ?? []).compactMap { c in
+                    guard let web = c["web"] as? [String: Any], let uri = web["uri"] as? String else { return nil }
+                    return (web["title"] as? String ?? uri, uri)
+                }
+                if !found.isEmpty { sources = found }
+            }
+        }
+        if parts.isEmpty { throw LLMError.refused(blocked) }
+        var r = GeminiResponse(parts: parts, usage: usage)
+        r.searchQueries = queries
+        r.sources = sources
+        return r
+    }
+
     private static func parse(_ data: Data) throws -> GeminiResponse {
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw LLMError.badResponse }
         let meta = obj["usageMetadata"] as? [String: Any]

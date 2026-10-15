@@ -58,6 +58,18 @@ public struct Router: Sendable {
         return words <= 6 && backReferences.contains { padded.contains($0) }
     }
 
+    private static let depthWords = [
+        "why", "how does", "how do", "how can", "how should", "explain", "difference between", "compare", "should i",
+        "what if", "pros and cons", "help me", "plan", "write", "solve", "calculate", "prove", "summarise", "summarize",
+        "advice", "recommend", "teach me", "step by step", "analyse", "analyze", "review", "translate", "draft",
+    ]
+
+    /// Questions that deserve a stronger model than the quick one: reasoning, advice, writing, anything long.
+    public static func isSubstantive(_ text: String) -> Bool {
+        let s = text.lowercased()
+        return s.split(separator: " ").count >= 12 || depthWords.contains { s.contains($0) }
+    }
+
     /// Questions about the Mac itself. The local model can answer these from a live reading.
     public static func isMacStatus(_ text: String) -> Bool {
         let s = " " + text.lowercased() + " "
@@ -97,17 +109,17 @@ public struct Router: Sendable {
         switch mode {
         case .chat, .web: return .lite     // Lite models have the most generous free allowance
         case .screen: return .flash
-        case .hard: return .pro
+        case .hard: return settings.usageSaver ? .flash : .pro
         }
     }
 
     /// The order tiers are tried in: the chosen one first, then lighter ones, and for everyday chat and
     /// search a step up to Flash too, so running out of Lite requests doesn't stop Jarvis.
-    func tierOrder(from start: Tier, mode: Mode) -> [Tier] {
+    func tierOrder(from start: Tier, mode: Mode, saver: Bool = false) -> [Tier] {
         var out: [Tier] = []
         var t: Tier? = start
         while let cur = t { out.append(cur); t = cur.fallback }
-        if start == .lite, mode == .chat || mode == .web { out.append(.flash) }
+        if start == .lite, mode == .chat || mode == .web, !saver { out.append(.flash) }
         return out
     }
 
@@ -115,7 +127,7 @@ public struct Router: Sendable {
     /// same tier (each has its own free allowance), then the lighter tiers.
     public func chain(for mode: Mode, settings: JarvisSettings, from override: Tier? = nil) -> [String] {
         var out: [String] = []
-        for cur in tierOrder(from: override ?? tier(for: mode, settings: settings), mode: mode) {
+        for cur in tierOrder(from: override ?? tier(for: mode, settings: settings), mode: mode, saver: settings.usageSaver) {
             let ids = [settings.modelID(cur)] + ModelPicker.ranked(cur, in: settings.knownModels).prefix(4)
             for id in ids where !out.contains(id) { out.append(id) }
         }
