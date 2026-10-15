@@ -145,7 +145,7 @@ public final class LocalBrain: @unchecked Sendable {
     public func startOllama() async -> Bool {
         if await ollamaReachable() { return true }
         if FileManager.default.fileExists(atPath: "/Applications/Ollama.app") {
-            _ = await Run.capture("/usr/bin/open", ["-g", "-a", "Ollama"])
+            _ = await Run.capture("/usr/bin/open", ["-g", "/Applications/Ollama.app"])
         } else if let bin = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"].first(where: { FileManager.default.fileExists(atPath: $0) }) {
             _ = await Run.capture("/bin/sh", ["-c", "nohup '\(bin)' serve >/dev/null 2>&1 &"])
         } else {

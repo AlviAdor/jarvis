@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.7.2
+- Start a freshly installed Ollama by its location, before macOS has registered it by name
+
 ## 0.7.1
 - Talk over Jarvis to stop it: it listens while speaking, learns how its own voice sounds in the mic, and stops as soon as you speak; what you say becomes the next request (mid-task, it only goes quiet)
 - More time to finish a sentence: the default pause is longer, and Jarvis waits longer again when a sentence trails off ("…and", "because…")
