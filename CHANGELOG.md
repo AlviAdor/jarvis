@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+- Notifications are clickable and have actions: reply to Jarvis right from the notification, copy or read an answer aloud, snooze a timer, and for Mac warnings jump straight to "Free up space", "What's using memory?", "What's draining the battery?" or "What's heating it up?"
+- Notifications show even while Jarvis is in front, and automations post their answer as a notification you can reply to
+- The floating bubble is clickable: open Jarvis, stop, read aloud, copy, ask something else or close; it stays put while the pointer is over it, and stays click-through while Jarvis is working on the screen
+- In-window notices can carry an action, such as Undo after Jarvis notes something new about you
+
 ## 0.7.2
 - Start a freshly installed Ollama by its location, before macOS has registered it by name
 

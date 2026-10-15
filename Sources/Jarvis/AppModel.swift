@@ -54,6 +54,11 @@ final class AppModel: ObservableObject {
     @Published var steps: [Step] = []
     @Published var history: [Exchange] = []
     @Published var notice: String?
+    /// A button on the notice, such as Undo.
+    @Published var noticeAction: String?
+    private var noticeHandler: (() -> Void)?
+    /// The pointer is over the floating bubble, so it stays put.
+    @Published var overlayHovered = false { didSet { if !overlayHovered { refreshOverlay() } else { hideTask?.cancel() } } }
     @Published var typed = ""
     @Published var highlight: Highlight?
     @Published var overlayVisible = false
@@ -86,6 +91,8 @@ final class AppModel: ObservableObject {
     /// The answer as the model wrote it, with code blocks and lists, for display.
     @Published var answerMarkdown = ""
     private var lastAttachments: [Attachment] = []
+    /// Post the answer as a notification (automations that run while you're elsewhere).
+    private var notifyAnswer = false
     /// True while Jarvis is talking.
     @Published private(set) var speaking = false
     /// Where the setup guide opens: returning users skip what they've already done.
@@ -186,7 +193,7 @@ final class AppModel: ObservableObject {
             if !speaking, self.phase == .speaking { self.phase = .idle }
         }
         speaker.onFallback = { [weak self] why in self?.log("Gemini voice unavailable, used the Mac voice: \(why)") }
-        scheduler.onFire = { [weak self] auto in self?.submit(auto.prompt) }
+        scheduler.onFire = { [weak self] auto in self?.submit(auto.prompt, notifyWhenDone: true) }
         memory.onChange = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -210,6 +217,8 @@ final class AppModel: ObservableObject {
         started = true
         installKillSwitch()
         scheduler.reschedule()
+        Notifier.shared.register()
+        Notifier.shared.onAction = { [weak self] action, info, typed in self?.handleNotification(action, info, typed) }
         if bundled, !needsOnboarding { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
         applySettings()
         voices = VoiceCatalog.all()
@@ -366,7 +375,8 @@ final class AppModel: ObservableObject {
         setWorkload(0)
     }
 
-    func submit(_ text: String) {
+    func submit(_ text: String, notifyWhenDone: Bool = false) {
+        notifyAnswer = notifyWhenDone
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needsOnboarding, !t.isEmpty || !attachments.isEmpty else { return }
         if t.isEmpty { t = attachments.count == 1 ? "What is this? Summarise it." : "What are these? Summarise them." }
@@ -844,12 +854,22 @@ final class AppModel: ObservableObject {
 
     private func checkHealth() {
         guard store.value.healthAlerts, !needsOnboarding else { return }
-        let alerts = SystemMonitor.alerts(SystemMonitor.shared.snapshot())
-        for a in alerts {
-            let key = String(a.prefix(24))
+        for a in SystemMonitor.alertItems(SystemMonitor.shared.snapshot()) {
+            let key = a.kind.rawValue
             if let last = lastAlerts[key], Date().timeIntervalSince(last) < 3600 { continue }
             lastAlerts[key] = Date()
-            notify("Jarvis", a)
+            let kind: Notifier.Kind
+            switch a.kind {
+            case .battery, .batteryHealth: kind = .battery
+            case .storage: kind = .storage
+            case .memory: kind = .memory
+            case .thermal: kind = .thermal
+            }
+            overlayText = a.text
+            overlayVisible = store.value.overlayEnabled
+            if store.value.speakReplies { speaker.say(a.text, settings: store.value) }
+            Notifier.shared.post(kind, title: "Your Mac", body: a.text)
+            refreshOverlay()
         }
     }
 
@@ -918,12 +938,7 @@ final class AppModel: ObservableObject {
         overlayText = body
         overlayVisible = store.value.overlayEnabled
         if store.value.speakReplies { speaker.say(body, settings: store.value) }
-        if bundled {
-            let c = UNMutableNotificationContent()
-            c.title = title
-            c.body = body
-            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
-        }
+        Notifier.shared.post(title == "Timer" ? .timer : .general, title: title == "Timer" ? "Timer" : title, body: body)
         refreshOverlay()
     }
 
@@ -931,6 +946,41 @@ final class AppModel: ObservableObject {
     private func record(_ q: String, _ a: String, source: String, mode: String) {
         reply(a, source: source)
         remember(q, Self.clean(a), source: source, mode: mode)
+        if notifyAnswer {
+            notifyAnswer = false
+            Notifier.shared.post(.answer, title: "Jarvis · \(q.prefix(60))", body: Self.clean(a), info: ["question": q])
+        }
+    }
+
+    // MARK: Notification actions
+
+    private func handleNotification(_ action: String, _ info: [String: String], _ typed: String?) {
+        let body = info["body"] ?? ""
+        func ask(_ q: String) { showWindow(); submit(q) }
+        switch action {
+        case "reply":
+            if let t = typed, !t.trimmingCharacters(in: .whitespaces).isEmpty { submit(t) }
+        case "copy": copy(body)
+        case "speak": speaker.say(Self.spoken(body), settings: store.value, queue: false)
+        case "snooze":
+            Notifier.shared.post(.timer, title: "Timer", body: body, after: 300)
+            flash("Snoozed for 5 minutes")
+        case "dismiss": break
+        case "freeSpace": ask("Free up some disk space. Show me what's safe to remove first.")
+        case "storageReport": ask("What's taking up my disk space?")
+        case "batteryDrain": ask("What's using my battery? Which apps use the most energy right now?")
+        case "batterySettings":
+            if let u = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension") { NSWorkspace.shared.open(u) }
+        case "memoryHogs": ask("What's using my memory right now?")
+        case "cpuHogs": ask("Which apps are using the most CPU right now?")
+        default:
+            showWindow()
+            if info["kind"] == "answer", !body.isEmpty, answer.isEmpty || answer != body {
+                question = info["question"] ?? question
+                answer = body
+                answerMarkdown = body
+            }
+        }
     }
 
     /// The conversation so far, for the models.
@@ -961,7 +1011,10 @@ final class AppModel: ObservableObject {
             guard !found.isEmpty else { return }
             found.forEach { memory.addFact($0) }
             log("Learned: " + found.joined(separator: " "))
-            flash("Noted: " + found.joined(separator: " "))
+            flash("Noted: " + found.joined(separator: " "), action: "Undo") { [weak self] in
+                found.forEach { self?.memory.removeFact($0) }
+                self?.flash("Forgotten")
+            }
         }
     }
 
@@ -1075,13 +1128,28 @@ final class AppModel: ObservableObject {
         refreshOverlay()
     }
 
-    func flash(_ text: String) {
+    func flash(_ text: String, action: String? = nil, run: (() -> Void)? = nil) {
         notice = text
+        noticeAction = action
+        noticeHandler = run
         noticeTask?.cancel()
         noticeTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            if !Task.isCancelled { self?.notice = nil }
+            try? await Task.sleep(nanoseconds: action == nil ? 2_500_000_000 : 6_000_000_000)
+            if !Task.isCancelled { self?.notice = nil; self?.noticeAction = nil }
         }
+    }
+
+    func runNoticeAction() {
+        let h = noticeHandler
+        notice = nil
+        noticeAction = nil
+        noticeHandler = nil
+        h?()
+    }
+
+    func dismissNotice() {
+        notice = nil
+        noticeAction = nil
     }
 
     func log(_ line: String) {
@@ -1097,9 +1165,10 @@ final class AppModel: ObservableObject {
         if phase != .idle {
             overlayVisible = true
         } else {
+            guard !overlayHovered else { return }
             hideTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 6_000_000_000)
-                if !Task.isCancelled, self?.quickActive == false { self?.overlayVisible = false }
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                if !Task.isCancelled, self?.quickActive == false, self?.overlayHovered == false { self?.overlayVisible = false }
             }
         }
     }

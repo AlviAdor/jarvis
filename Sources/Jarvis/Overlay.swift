@@ -8,6 +8,7 @@ import JarvisCore
 private struct QuickView: View {
     @EnvironmentObject var model: AppModel
     @FocusState private var focused: Bool
+    @State private var hover = false
 
     var body: some View {
         // Nothing to draw or update while the bar is hidden.
@@ -24,20 +25,14 @@ private struct QuickView: View {
                     Text(model.overlayText.isEmpty ? "Go ahead, I'm listening" : model.overlayText)
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(.primary)
-                        .lineLimit(model.quickActive ? 8 : 3)
-                        .textSelection(.enabled)
+                        .lineLimit(model.quickActive || hover ? 8 : 3)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if model.quickActive {
-                    VStack(spacing: 6) {
-                        OrbButton(icon: "xmark", size: 22) { model.closeQuick() }
-                        if !model.answer.isEmpty, model.phase == .idle || model.phase == .speaking {
-                            OrbButton(icon: "doc.on.doc", size: 22) { model.copyAnswer() }
-                                .help("Copy the answer")
-                        }
-                    }
-                }
+                .contentShape(Rectangle())
+                .onTapGesture { if !model.quickActive { model.showWindow() } }
+                .help(model.quickActive ? "" : "Open Jarvis")
+                actions
             }
             if model.busy, let running = model.steps.last {
                 HStack(spacing: 8) {
@@ -74,10 +69,41 @@ private struct QuickView: View {
         .padding(16)
         .frame(width: 600)
         .glassCard(26)
+        .onHover { h in
+            withAnimation(.easeOut(duration: 0.15)) { hover = h }
+            model.overlayHovered = h
+        }
         .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(model.accent.opacity(0.4), lineWidth: 1))
         .preferredColorScheme(model.colorScheme)
         .tint(model.accent)
         .padding(10)   // room for the shadow
+    }
+
+    /// What you can do with what the bubble is showing.
+    private var actions: some View {
+        let answered = !model.answer.isEmpty && (model.phase == .idle || model.phase == .speaking)
+        return HStack(spacing: 6) {
+            if model.busy {
+                OrbButton(icon: "stop.fill", tint: .red, size: 24) { model.stopEverything() }
+                    .help("Stop (Esc)")
+            }
+            if answered {
+                OrbButton(icon: "speaker.wave.2", size: 24) { model.speakAgain() }
+                    .help("Read aloud")
+                OrbButton(icon: "doc.on.doc", size: 24) { model.copyAnswer() }
+                    .help("Copy the answer")
+            }
+            if !model.quickActive {
+                OrbButton(icon: "macwindow", size: 24) { model.showWindow() }
+                    .help("Open Jarvis")
+                OrbButton(icon: "mic", size: 24) { model.hotkeyPressed() }
+                    .help("Ask something else")
+            }
+            OrbButton(icon: "xmark", size: 24) {
+                if model.quickActive { model.closeQuick() } else { model.overlayHovered = false; model.overlayVisible = false }
+            }
+            .help("Close")
+        }
     }
 
     private var label: String {
@@ -118,7 +144,8 @@ final class OverlayController {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
+        panel.acceptsMouseMovedEvents = true
         panel.becomesKeyOnlyIfNeeded = false
         panel.hidesOnDeactivate = false
         panel.sharingType = .none   // keep it out of the screenshots the model sees
@@ -127,9 +154,12 @@ final class OverlayController {
         model.$overlayVisible.removeDuplicates().sink { [weak self] visible in
             visible ? self?.show() : self?.hide()
         }.store(in: &bag)
+        // Clickable, except while Jarvis is clicking on the screen itself, so it never gets in the way.
+        model.$phase.combineLatest(model.$quickActive).sink { [weak self] phase, active in
+            self?.panel.ignoresMouseEvents = phase == .acting && !active
+        }.store(in: &bag)
         model.$quickActive.removeDuplicates().sink { [weak self] active in
             guard let self else { return }
-            self.panel.ignoresMouseEvents = !active
             if active {
                 self.show()
                 self.panel.makeKey()

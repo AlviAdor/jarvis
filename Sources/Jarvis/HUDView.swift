@@ -104,13 +104,24 @@ struct HUDView: View {
             }
 
             if let n = model.notice {
-                Text(n)
-                    .font(.callout.weight(.medium))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 9)
-                    .glassCard(20)
-                    .padding(.top, 60)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                HStack(spacing: 12) {
+                    Text(n)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(2)
+                    if let action = model.noticeAction {
+                        Button(action) { model.runNoticeAction() }
+                            .buttonStyle(.borderless)
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(model.accent)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+                .glassCard(20)
+                .onTapGesture { model.dismissNotice() }
+                .help("Click to dismiss")
+                .padding(.top, 60)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .overlay {
