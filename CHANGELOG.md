@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0
+- Uses other AI assistants for you: say "ask ChatGPT to…", "tell Claude…" or "use Grok to…" (also Gemini, Perplexity and Copilot); Jarvis turns your words into a well-structured prompt on this Mac, opens the desktop app or the website, types the prompt into its message box where you can watch, and sends it
+- Add "and read me the answer" and Jarvis waits for the reply and reads it back
+- Prompts are written by the on-device model when it's available, so this costs no Gemini quota
+- The project-detection test no longer depends on where the code is checked out
+
 ## 0.11.0
 **Operating your Mac smartly**
 - Jarvis works apps through their real controls (Accessibility): it reads the front window's buttons, fields and menus, presses and fills them by name, chooses menu items like "File > Export as PDF…", switches apps and minimises, closes or hides windows, all without screenshots

@@ -41,6 +41,7 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 - Operates apps through their real buttons, fields and menus, AppleScript, files and the browser, and Gemini's computer use for screen tasks
 - Git, tests, linting, API calls, SQLite, documents (proposals, contracts, reports), Mail drafts, RSS feeds, Spotify, audio devices and focus noise
 - Connectors for HubSpot, Notion, Airtable, Slack, GitHub and Postgres
+- Drives other AI assistants (ChatGPT, Claude, Gemini, Grok, Perplexity, Copilot): it writes a proper prompt from your words, types it into their message box and can read the reply back
 
 **Remembers you**
 - Keeps the conversation across restarts, so follow-ups like "and tomorrow?" just work
