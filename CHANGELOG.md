@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.14.0
+**Research**
+- Say "research…", "do a deep dive into…", "write me a report on…", or turn on the new Research switch: Jarvis plans several searches, runs them at the same time, reads the best sources in full and writes a cited brief with a bottom line, key findings and where sources disagree
+- Depth follows the effort setting (from 3 searches and 2 pages up to 8 and 8), and the usage saver keeps it small and on Lite models; searches are spread across models so no single one hits its per-minute limit
+- The report appears as it's written, the bottom line is read aloud, and it's saved in Documents › Jarvis › Research
+- The assistant can also research in the middle of a bigger job, such as "find the best student laptop under 1000 and put it in a note"
+
+**Filling forms**
+- "Fill this in with my details" reads every field on the web page or in the app (labels, kinds, required fields, options, radio groups), fills them in one go and says what's left
+- Your details come from your card in Contacts and a new Details for forms box in Settings › Memory (kept in the Keychain); attach your CV and it's used too
+- Web forms are typed the way a person types, so the page registers every change; choices, checkboxes and radio buttons are set by their real controls
+- Never fills passwords, card details or codes, never submits unless you ask, and stops at once if you switch to another app while it types
+- Works through multi-page forms with Next and Continue
+
+**Fixes**
+- When Google Search is out of free requests on your Gemini key, web search and research use open web results (DuckDuckGo, whose robots.txt allows it) and read the pages instead of failing
+- A refused Google Search no longer pauses that model for everything else, which could turn ordinary questions into "usage limit" errors
+- After its greeting is interrupted, Jarvis no longer mistakes its own voice for a request
+- The status no longer stays on Thinking after a local answer is read out
+- App controls now act on the app you're using even while Jarvis's window is in front
+- A `jarvis-mac://` link that only this Jarvis answers, for Shortcuts and Siri when another app also claims `jarvis://`
+
 ## 0.13.0
 **Faster**
 - Replies start speaking at the first finished sentence for every kind of answer, and the rest follows without gaps; Gemini voices fetch the next sentence while the current one plays

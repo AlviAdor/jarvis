@@ -17,7 +17,7 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 - Media keys, volume, brightness, dark mode, Wi-Fi, lock screen, sleep display
 - Open, quit and switch apps; find, open and read files (PDF, Word, RTF, text)
 - Web search with sources, and reading web pages
-- Your Shortcuts, plus a `jarvis://` URL scheme so Siri and Shortcuts can call Jarvis
+- Your Shortcuts, plus `jarvis://` and `jarvis-mac://` links so Siri and Shortcuts can call Jarvis (use `jarvis-mac://` if another app also answers `jarvis://`)
 - Scheduled automations, timers, and facts it remembers about you
 - Screen control: it looks at the screen, moves the real cursor, clicks and types, showing each step. Esc stops it at any time
 - Open-source tool servers through the Model Context Protocol (MCP)
@@ -36,6 +36,10 @@ A voice-first assistant for macOS. Say "Jarvis", or press a shortcut from any ap
 
 **Any language**
 - Talk or type in almost any language; Jarvis understands it (through Gemini) and answers and speaks in the same language
+
+**Research and forms**
+- Deep research: several searches at once, sources read in full, a cited report with where sources disagree, saved to Documents
+- Fills forms on web pages and in apps from your Contacts card and saved details; never passwords or card details, and never submits without you
 
 **Effort and usage**
 - Effort from Low to Max controls thinking depth, model strength and answer length; the usage saver stretches the free Gemini allowance; when the cloud isn't available, the local model answers
