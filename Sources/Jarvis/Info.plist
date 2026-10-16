@@ -22,6 +22,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>jarvis</string>
+				<string>jarvis-mac</string>
 			</array>
 		</dict>
 	</array>

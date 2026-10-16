@@ -444,7 +444,7 @@ private struct TourPage: View {
             Feature(icon: "command", title: "One shortcut, from any app", text: "Press your shortcut to open the floating ask bar: speak, or type, and the answer appears right there.")
             Feature(icon: "gauge.with.dots.needle.67percent", title: "It looks after your Mac", text: "Ask how your Mac is doing, what's slowing it down, or to free up disk space. It warns you about low battery, low storage and overheating.")
             Feature(icon: "dock.rectangle", title: "Always within reach", text: "Find Jarvis in the Dock, the menu bar, Spotlight and Launchpad. Settings has every option, including voices, models and safety.")
-            Feature(icon: "apps.iphone", title: "Siri and Shortcuts", text: "Make a Shortcut named \u{201C}Ask Jarvis\u{201D} that opens jarvis://listen, then say \u{201C}Hey Siri, Ask Jarvis\u{201D}. Jarvis can also run your Shortcuts.")
+            Feature(icon: "apps.iphone", title: "Siri and Shortcuts", text: "Make a Shortcut named \u{201C}Ask Jarvis\u{201D} that opens jarvis-mac://listen, then say \u{201C}Hey Siri, Ask Jarvis\u{201D}. Jarvis can also run your Shortcuts.")
         }
     }
 }

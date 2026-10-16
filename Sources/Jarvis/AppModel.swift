@@ -618,7 +618,7 @@ final class AppModel: ObservableObject {
 
     func removeAttachment(_ id: UUID) { attachments.removeAll { $0.id == id } }
 
-    /// jarvis://ask?q=... and jarvis://listen let Shortcuts and Siri hand Jarvis a request.
+    /// jarvis://ask?q=... and jarvis://listen (or jarvis-mac://, which no other app claims) let Shortcuts and Siri hand Jarvis a request.
     func handle(url: URL) {
         switch url.host {
         case "ask":
