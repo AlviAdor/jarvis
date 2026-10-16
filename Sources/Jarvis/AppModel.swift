@@ -88,6 +88,7 @@ final class AppModel: ObservableObject {
     @Published var searchOn = false
     @Published var thinkOn = false
     @Published var screenOn = false
+    @Published var researchOn = false
     /// The answer as the model wrote it, with code blocks and lists, for display.
     @Published var answerMarkdown = ""
     private var lastAttachments: [Attachment] = []
@@ -694,6 +695,12 @@ final class AppModel: ObservableObject {
             return
         }
 
+        // "Research…", "deep dive into…", or the Research switch: search many sources and write a cited brief.
+        if !store.geminiKey.isEmpty, files.isEmpty, !screenOn, researchOn || (!followUp && Research.isRequest(text)) {
+            await answerWithResearch(text, began: began)
+            return
+        }
+
         // Questions about the Mac itself: answered from a live reading, on this Mac when possible.
         if !followUp, Router.isMacStatus(text) {
             let snap = SystemMonitor.shared.snapshot()
@@ -817,9 +824,19 @@ final class AppModel: ObservableObject {
         let key = store.geminiKey
         let tracker = usage
         var search: (@Sendable (String) async -> String)?
+        var research: (@Sendable (String) async -> String)?
         if !key.isEmpty {
             search = { q in
                 await AppModel.webSearch(q, key: key, settings: s) { u in Task { @MainActor in tracker.add(u) } }
+            }
+            research = { [weak self] q in
+                guard let self else { return "Research isn't available right now." }
+                do {
+                    let (report, saved) = try await self.research(q, streaming: false)
+                    return report.text + (saved.map { "\n\n(Saved to \($0.path))" } ?? "")
+                } catch {
+                    return "The research didn't finish: \(Friendly.message(error))"
+                }
             }
         }
         return ToolBox(
@@ -830,8 +847,65 @@ final class AppModel: ObservableObject {
             mcp: mcp,
             search: search,
             setSetting: { [weak self] name, value in await self?.changeSetting(name, value) ?? "Couldn't change that." },
+            research: research,
             hint: hint
         )
+    }
+
+    // MARK: Research
+
+    /// Plans the searches, runs them side by side, reads the sources and writes a cited brief, saved to Documents.
+    private func research(_ question: String, streaming: Bool) async throws -> (Research.Report, URL?) {
+        let s = store.value
+        let lite = Hearing.unique([s.liteModel] + ModelPicker.ranked(.lite, in: s.knownModels).prefix(2))
+        let flash = Hearing.unique([s.flashModel] + ModelPicker.ranked(.flash, in: s.knownModels).prefix(2))
+        let pro = Hearing.unique([s.proModel] + ModelPicker.ranked(.pro, in: s.knownModels).prefix(1))
+        // The usage saver keeps to Lite; otherwise searches are spread over Lite and Flash, and the writing gets the
+        // strongest model the effort setting allows.
+        let plan = s.usageSaver ? lite : flash + lite
+        let searchModels = s.usageSaver ? lite : lite + flash
+        let write = s.usageSaver ? lite : s.effort == "max" ? pro + flash : s.effort == "low" ? flash + lite : flash + pro + lite
+        let tracker = usage
+        var draft: (@Sendable (String) -> Void)?
+        if streaming { draft = { [weak self] t in Task { @MainActor in self?.showDraft(t) } } }
+        let report = try await Research.run(
+            question: question, context: memory.profile(name: s.userName), depth: Research.depth(effort: s.effort, usageSaver: s.usageSaver),
+            effort: s.effort, client: GeminiClient(apiKey: store.geminiKey),
+            planModels: plan, searchModels: searchModels, writeModels: write,
+            progress: { [weak self] e in await self?.apply(e) },
+            usage: { u in Task { @MainActor in tracker.add(u) } },
+            onText: draft)
+        return (report, Research.save(report, question: question))
+    }
+
+    /// The report appears as it's written; only the bottom line is read aloud.
+    private func showDraft(_ t: String) {
+        guard busy else { return }
+        answerMarkdown = t
+        answer = Self.clean(t)
+    }
+
+    private func answerWithResearch(_ text: String, began: Date) async {
+        guard !usage.overCap(store.value.dailyRequestCap) else {
+            reply("You've reached today's request limit. You can raise it in Settings.")
+            return
+        }
+        setWorkload(0.7)
+        // Research takes a minute; say so when the request was spoken, so the quiet isn't a mystery.
+        if text == lastHeard, store.value.speakReplies {
+            speaker.say(["On it. This takes about a minute.", "Researching that now.", "Let me look into it properly."].randomElement()!, settings: store.value, queue: false)
+        }
+        do {
+            let (report, saved) = try await research(text, streaming: true)
+            record(text, report.text, source: "Research · \(report.sources.count) sources · \(Self.elapsed(began))", mode: "web")
+            if let saved {
+                flash("Saved to Documents › Jarvis › Research", action: "Open") { NSWorkspace.shared.open(saved) }
+            }
+        } catch is CancellationError {
+            phase = .idle
+        } catch {
+            reply(Friendly.message(error))
+        }
     }
 
     /// Grounded Google Search through Gemini, returned as text with its sources.

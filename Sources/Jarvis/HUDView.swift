@@ -659,6 +659,7 @@ private struct Composer: View {
                 }
                 HStack(spacing: 6) {
                     ToolPill(title: "Search", icon: "globe", on: $model.searchOn, help: "Look things up on the web, with sources")
+                    ToolPill(title: "Research", icon: "doc.text.magnifyingglass", on: $model.researchOn, help: "Search many sources, read them and write a cited report")
                     ToolPill(title: "Think", icon: "lightbulb", on: $model.thinkOn, help: "Use the strongest model and think it through")
                     ToolPill(title: "Screen", icon: "cursorarrow.rays", on: $model.screenOn, help: "Let Jarvis see and operate your screen")
                     Spacer()

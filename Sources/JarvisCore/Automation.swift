@@ -31,7 +31,7 @@ public enum Browser {
     /// The browser in front, or the first one that's open.
     static func active() -> String? {
         let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.localizedName))
-        if let front = NSWorkspace.shared.frontmostApplication?.localizedName, front == "Safari" || chromium.contains(front) { return front }
+        if let front = UIControl.userApp()?.localizedName, front == "Safari" || chromium.contains(front) { return front }
         return (["Safari"] + chromium).first { running.contains($0) }
     }
 

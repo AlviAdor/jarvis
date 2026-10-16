@@ -20,6 +20,7 @@ public final class ToolBox: @unchecked Sendable {
     private let onAction: @Sendable (ActionEvent) -> Void
     private let mcp: [MCPTool]
     private let search: (@Sendable (String) async -> String)?
+    private let research: (@Sendable (String) async -> String)?
     private let setSetting: (@Sendable (String, String) async -> String)?
     /// What the user asked, so only the tool groups that could matter are sent (smaller, faster requests).
     private let hint: String
@@ -44,7 +45,9 @@ public final class ToolBox: @unchecked Sendable {
                 mcp: [MCPTool] = [],
                 search: (@Sendable (String) async -> String)? = nil,
                 setSetting: (@Sendable (String, String) async -> String)? = nil,
+                research: (@Sendable (String) async -> String)? = nil,
                 hint: String = "") {
+        self.research = research
         self.hint = hint
         self.settings = settings
         self.memory = memory
@@ -70,6 +73,7 @@ public final class ToolBox: @unchecked Sendable {
     static let readsOutside: Set<String> = [
         "mail_unread", "read_file", "list_folder", "clipboard_read", "shell", "fetch_url", "web_search",
         "calendar", "notes", "find_files", "shortcuts", "run_applescript", "ui", "browser", "read_feed", "http_request", "sqlite",
+        "form", "research",
     ]
 
     static let groupWords: [String: [String]] = [
@@ -82,6 +86,8 @@ public final class ToolBox: @unchecked Sendable {
         "docs": ["proposal", "contract", "nda", "agreement", "document", "report", "save", "case study", "cover letter", "invoice",
                  "draft", "word", "docx", "status update", "release notes", "portfolio", "letter", "template", "email"],
         "feeds": ["feed", "rss", "jobs", "job ", "upwork", "fiverr", "linkedin", "freelance", "news", "blog", "postings", "gig"],
+        "forms": ["form", "fill", "application", "apply", "sign up", "signup", "register", "registration", "survey", "questionnaire",
+                  "checkout", "my details", "enrol", "enroll", "admission", "booking", "field"],
     ]
 
     /// Whether a group of tools could matter for this request. With no hint (automations), everything is offered.
@@ -141,6 +147,11 @@ public final class ToolBox: @unchecked Sendable {
         if search != nil, settings.searchEnabled {
             d.append(Self.fn("web_search", "Search the web for current information and get a sourced answer.", ["query": ("STRING", "Search query")], required: ["query"]))
         }
+        if research != nil, settings.searchEnabled {
+            d.append(Self.fn("research", "Research a question in depth: plans several searches, runs them at once, reads the best sources in full and returns a cited brief (bottom line, key findings, where sources disagree). Use it for comparisons, buying or study decisions, reports, background on a topic, and anything that needs several sources; use web_search for a single fact.", [
+                "question": ("STRING", "The research question, with the details that matter (budget, place, dates, purpose)"),
+            ], required: ["question"]))
+        }
         if settings.webReadEnabled {
             d.append(Self.fn("fetch_url", "Read the text of a web page.", ["url": ("STRING", "http or https URL")], required: ["url"]))
         }
@@ -162,6 +173,13 @@ public final class ToolBox: @unchecked Sendable {
             d.append(Self.fn("run_applescript", "Run AppleScript to automate Mac apps (Finder, Safari, Music, Mail, Notes, System Events and more). The script is shown to the user; risky ones ask first.", [
                 "script": ("STRING", "AppleScript source"), "purpose": ("STRING", "One short sentence on what it does"),
             ], required: ["script", "purpose"]))
+            if wants("forms") {
+                d.append(Self.fn("form", "Fill in a form on the web page or in the app in front, the way a person would. read lists every field (id, kind, label, required, options, current value) and the user's details for forms (their Contacts card, saved details and profile). fill sets many fields at once from a JSON object of field id to value. Nothing is ever submitted by this tool; passwords, card details and codes are never filled.", [
+                    "action": ("STRING", "read or fill"),
+                    "values": ("STRING", "For fill: JSON object of field id to value, e.g. {\"f1\": \"Alvi\", \"f4\": \"Bangladesh\", \"f7\": true}. Use an option's exact text for select fields and true/false for checkboxes and radio buttons."),
+                    "app": ("STRING", "Optional app name; default is the app the user is working in"),
+                ], required: ["action"]))
+            }
             d.append(Self.fn("browser", "The user's web browser: the page they're on, their open tabs, reading the current page's text, or opening a link.", [
                 "action": ("STRING", "current, tabs, read or open"), "url": ("STRING", "For open"),
             ], required: ["action"]))
@@ -402,6 +420,8 @@ public final class ToolBox: @unchecked Sendable {
         case "today_brief": return ("Preparing your briefing", nil, nil, "sun.max")
         case "update_setting": return ("Changing a setting", "\(s("name")) → \(s("value"))", nil, "slider.horizontal.3")
         case "web_search": return ("Searching the web", "\u{201C}\(s("query"))\u{201D}", nil, "globe")
+        case "research": return ("Researching", s("question"), nil, "doc.text.magnifyingglass")
+        case "form": return (s("action") == "fill" ? "Filling in the form" : "Reading the form", nil, nil, "list.clipboard")
         case "fetch_url": return ("Reading \(URL(string: s("url"))?.host ?? "a page")", s("url"), nil, "doc.richtext")
         case "disk":
             switch s("action") {
@@ -650,6 +670,24 @@ public final class ToolBox: @unchecked Sendable {
             return ToolResult(await search(str("query")))
         case "fetch_url":
             return ToolResult(await Web.fetch(str("url")))
+        case "research":
+            guard let research else { return ToolResult("Research needs a Gemini key.") }
+            return ToolResult(await research(str("question")))
+        case "form":
+            if str("action") == "fill" {
+                guard let data = str("values").data(using: .utf8),
+                      let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any], !values.isEmpty else {
+                    return ToolResult("values must be a JSON object of field id to value, from the last form read.")
+                }
+                // Filling a form the user didn't ask about, after reading outside content, needs their OK.
+                if tainted, !wants("forms"), !(await ask("Fill in \(values.count) field\(values.count == 1 ? "" : "s") in \(Forms.lastApp)?")) {
+                    return ToolResult("The user declined.")
+                }
+                return ToolResult(await Forms.fill(values), screenshot: true)
+            }
+            let app = str("app").isEmpty ? nil : str("app")
+            let form = await Forms.read(app: app)
+            return ToolResult(form + "\n\nThe user's details for forms:\n" + Forms.details(saved: Keychain.get("form-details") ?? "", settings: settings), screenshot: true)
         case "disk":
             return await disk(a)
         case "organize_folder":

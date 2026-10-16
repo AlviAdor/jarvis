@@ -19,16 +19,16 @@ public enum UIControl {
         "AXIncrementor", "AXSegmentedControl", "AXStaticText", "AXImage", "AXMenuItem",
     ]
 
-    private static func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+    static func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
         var v: CFTypeRef?
         return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
     }
 
-    private static func str(_ el: AXUIElement, _ name: String) -> String {
+    static func str(_ el: AXUIElement, _ name: String) -> String {
         (attr(el, name) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    private static func children(_ el: AXUIElement) -> [AXUIElement] {
+    static func children(_ el: AXUIElement) -> [AXUIElement] {
         (attr(el, kAXChildrenAttribute) as? [AXUIElement]) ?? []
     }
 
@@ -53,14 +53,28 @@ public enum UIControl {
         return CGRect(origin: point, size: size)
     }
 
-    private static func appElement(_ name: String?) -> (AXUIElement, NSRunningApplication)? {
+    /// The app the user is working in: the one in front, or, while Jarvis's own window is in front,
+    /// the app whose window is next in line.
+    public static func userApp() -> NSRunningApplication? {
+        let me = ProcessInfo.processInfo.processIdentifier
+        if let f = NSWorkspace.shared.frontmostApplication, f.processIdentifier != me { return f }
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        for w in windows where (w[kCGWindowLayer as String] as? Int) == 0 {
+            guard let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+                  let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular else { continue }
+            return app
+        }
+        return nil
+    }
+
+    static func appElement(_ name: String?) -> (AXUIElement, NSRunningApplication)? {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         let app: NSRunningApplication?
         if let name, !name.isEmpty {
             app = apps.first { $0.localizedName?.caseInsensitiveCompare(name) == .orderedSame }
                 ?? apps.first { $0.localizedName?.localizedCaseInsensitiveContains(name) == true }
         } else {
-            app = NSWorkspace.shared.frontmostApplication
+            app = userApp()
         }
         guard let app else { return nil }
         let el = AXUIElementCreateApplication(app.processIdentifier)

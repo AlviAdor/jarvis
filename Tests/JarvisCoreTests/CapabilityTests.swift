@@ -740,3 +740,86 @@ final class HearingTests: XCTestCase {
         XCTAssertEqual(hints.filter { $0 == "Jarvis" }.count, 1)
     }
 }
+
+final class ResearchTests: XCTestCase {
+    func testResearchRequestsAreRecognised() {
+        for t in ["research the best laptops for students under 1000 dollars", "Jarvis, can you research scholarships in Germany",
+                  "do a deep dive into solid state batteries", "write me a report on the garment industry in Bangladesh",
+                  "look into whether I need a visa for Japan"] {
+            XCTAssertTrue(Research.isRequest(t), t)
+        }
+        for t in ["what's the weather in Dhaka", "my research paper is due friday, remind me tomorrow", "open Safari"] {
+            XCTAssertFalse(Research.isRequest(t), t)
+        }
+    }
+
+    func testPlansAreReadFromJSONOrLines() {
+        let json = Research.parsePlan("```json\n{\"title\": \"Student laptops\", \"queries\": [\"best student laptop 2026\", \"MacBook Air M5 price Bangladesh\", \"best student laptop 2026\"]}\n```", question: "q", max: 4)
+        XCTAssertEqual(json.title, "Student laptops")
+        XCTAssertEqual(json.queries, ["best student laptop 2026", "MacBook Air M5 price Bangladesh"])
+        let lines = Research.parsePlan("1. first search\n2. second search\n3. third search", question: "q", max: 2)
+        XCTAssertEqual(lines.queries, ["first search", "second search"])
+        XCTAssertEqual(Research.parsePlan("", question: "why is the sky blue", max: 3).queries, ["why is the sky blue"])
+    }
+
+    func testEachAngleGetsReadAndSourcesAreCited() {
+        let a = Research.Finding(query: "a", text: "", sources: [.init(title: "bbc.com", url: "u1"), .init(title: "nasa.gov", url: "u2")])
+        let b = Research.Finding(query: "b", text: "", sources: [.init(title: "bbc.com", url: "u3"), .init(title: "who.int", url: "u4")])
+        XCTAssertEqual(Research.pickSources([a, b], max: 3).map(\.title), ["bbc.com", "nasa.gov", "who.int"])
+        let list = Research.sourceList("Fact one [2]. Fact two [1][2].", sources: [.init(title: "A", url: "https://a"), .init(title: "B", url: "https://b"), .init(title: "C", url: "https://c")])
+        XCTAssertTrue(list.contains("1. [A](https://a)") && list.contains("2. [B](https://b)"))
+        XCTAssertFalse(list.contains("https://c"))
+    }
+
+    func testAnglesAreBatchedIntoFewRequests() {
+        XCTAssertEqual(Research.batches(["a", "b", "c"]), [["a", "b", "c"]])
+        XCTAssertEqual(Research.batches(["a", "b", "c", "d", "e"]), [["a", "c", "e"], ["b", "d"]])
+        XCTAssertEqual(Research.batches((1...8).map(String.init)).count, 2)
+    }
+
+    func testSourcesAreGroupedBySite() {
+        XCTAssertEqual(Research.site(.init(title: "x", url: "https://www.bbc.com/news/1")), "bbc.com")
+        XCTAssertEqual(Research.site(.init(title: "nasa.gov", url: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc")), "nasa.gov")
+    }
+
+    func testDepthFollowsEffortAndSaver() {
+        XCTAssertLessThan(Research.depth(effort: "max", usageSaver: true).queries, Research.depth(effort: "balanced", usageSaver: false).queries)
+        XCTAssertGreaterThan(Research.depth(effort: "max", usageSaver: false).reads, Research.depth(effort: "low", usageSaver: false).reads)
+    }
+}
+
+final class FormTests: XCTestCase {
+    func testSecretsAreNeverFilled() {
+        for l in ["Password", "Confirm password", "Card number", "CVV", "Security code", "One-time code", "Enter your PIN"] {
+            XCTAssertTrue(Forms.isSensitive(l), l)
+        }
+        for l in ["First name", "Email address", "Phone", "Spinning class", "Opinion"] {
+            XCTAssertFalse(Forms.isSensitive(l), l)
+        }
+    }
+
+    func testOptionsAreMatchedSensibly() {
+        let countries = ["Select a country", "Bangladesh", "Belgium", "India", "United Kingdom", "United States"]
+        XCTAssertEqual(Forms.bestOption("bangladesh", in: countries), "Bangladesh")
+        XCTAssertEqual(Forms.bestOption("United", in: countries), "United Kingdom")
+        XCTAssertEqual(Forms.bestOption("the United States of America", in: countries), "United States")
+        XCTAssertNil(Forms.bestOption("Narnia", in: countries))
+        XCTAssertTrue(Forms.truthy(true) && Forms.truthy("Yes") && Forms.truthy(NSNumber(value: 1)))
+        XCTAssertFalse(Forms.truthy("no") || Forms.truthy(false))
+    }
+
+    func testFormsAreDescribedForTheModel() {
+        let fields = [
+            Forms.Field(id: "f1", kind: .text, label: "First name", placeholder: "", value: "", options: [], required: true),
+            Forms.Field(id: "f2", kind: .choice, label: "Country", placeholder: "", value: "Select", options: ["Bangladesh", "India"], required: false),
+            Forms.Field(id: "f3", kind: .secret, label: "Password", placeholder: "", value: "", options: [], required: true),
+            Forms.Field(id: "f4", kind: .checkbox, label: "I agree", placeholder: "", value: "off", options: [], required: false),
+        ]
+        let d = Forms.describe(fields, app: "Safari", title: "Apply", buttons: ["Next", "Next", "Save draft"])
+        XCTAssertTrue(d.contains("f1 text \u{201C}First name\u{201D} required = empty"))
+        XCTAssertTrue(d.contains("options: Bangladesh | India"))
+        XCTAssertTrue(d.contains("f3 secret \u{201C}Password\u{201D} required — never filled by Jarvis"))
+        XCTAssertTrue(d.contains("f4 checkbox \u{201C}I agree\u{201D} = off"))
+        XCTAssertTrue(d.hasSuffix("Buttons: Next, Save draft"))
+    }
+}

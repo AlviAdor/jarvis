@@ -545,6 +545,9 @@ private struct MemoryTab: View {
             Section("About you") {
                 AboutYouForm()
             }
+            Section("Details for forms") {
+                FormDetailsEditor()
+            }
             Section("Memory") {
                 Toggle("Remember our conversation, even after Jarvis restarts", isOn: bind(model, \.rememberConversations))
                 Toggle("Learn about me from what I say", isOn: bind(model, \.learnAboutMe))
@@ -633,5 +636,36 @@ private struct AboutTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// What forms ask for beyond the Contacts card, kept in the Keychain and used only when filling a form.
+private struct FormDetailsEditor: View {
+    @State private var text = ""
+    @State private var loaded = false
+    @State private var save: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextEditor(text: $text)
+                .font(.callout)
+                .frame(minHeight: 90)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                .onChange(of: text) { _, t in
+                    guard loaded else { return }
+                    save?.cancel()
+                    save = Task {
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                        if !Task.isCancelled { Keychain.set(t, for: "form-details") }
+                    }
+                }
+            Hint("One per line, for example: Student ID: 12-34567-8, University, Degree, Graduation year, LinkedIn: …, Emergency contact: …. Your name, email, phone, address and birthday come from your card in Contacts. Kept in your Keychain and used only when you ask Jarvis to fill a form. Jarvis never fills passwords or card details.")
+        }
+        .onAppear {
+            text = Keychain.get("form-details") ?? ""
+            DispatchQueue.main.async { loaded = true }
+        }
     }
 }
