@@ -113,6 +113,15 @@ public final class GeminiAgent: @unchecked Sendable {
                 }
                 tools.report(ActionEvent(id: id, title: "Searched the web", detail: detail, state: .done))
                 return AgentOutcome(success: true, summary: r.text.isEmpty ? "I couldn't find anything." : r.text)
+            } catch LLMError.http(let code, let body) where code == 429 {
+                // Google Search is out of free requests on this key: search the open web, read the pages and answer from them.
+                let (material, hits) = await WebSearch.material(task)
+                guard !hits.isEmpty else { throw LLMError.http(code, body) }
+                tools.report(ActionEvent(id: id, title: "Searched the web", detail: hits.prefix(4).map { URL(string: $0.url)?.host ?? $0.url }.joined(separator: "\n"), state: .done))
+                var withResults = contents
+                withResults.append(["role": "user", "parts": [["text": "Web results and pages to answer from. Use only what they support, mention the sites you rely on, and give dates for anything that changes:\n\n" + material]]])
+                let r = try await generate(mode: .chat, contents: withResults, tools: [], maxTokens: 1024)
+                return AgentOutcome(success: true, summary: r.text.isEmpty ? "I couldn't find anything." : r.text)
             } catch LLMError.http(let code, _) where code == 400 || code == 403 {
                 // Search isn't available on this key or model: answer from what the model knows.
                 tools.report(ActionEvent(id: id, title: "Web search unavailable", detail: "Answering from what I know", state: .failed))

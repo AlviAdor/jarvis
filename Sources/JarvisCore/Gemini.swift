@@ -59,10 +59,11 @@ public final class GeminiClient: @unchecked Sendable {
             "generationConfig": gen,
         ]
         if !tools.isEmpty { body["tools"] = tools }
+        let quota = Self.quotaKey(model, tools: tools)
 
         // Don't spend a request on a model Google has already said no to; the caller moves on.
-        if !QuotaBook.shared.usable(model) {
-            let why = QuotaBook.shared.reason(model).map { QuotaBook.describe(model, $0.kind, $0.until) } ?? "resting"
+        if !QuotaBook.shared.usable(quota) {
+            let why = QuotaBook.shared.reason(quota).map { QuotaBook.describe(model, $0.kind, $0.until) } ?? "resting"
             throw LLMError.http(429, #"{"error":{"message":"\#(why)","status":"RESOURCE_EXHAUSTED"},"jarvis":"skipped"}"#)
         }
         var delay: UInt64 = 1_000_000_000
@@ -76,7 +77,7 @@ public final class GeminiClient: @unchecked Sendable {
             if code == 200 { return try Self.parse(data) }
             // Quota: note it and hand back at once, so the caller can move to another model without waiting.
             if code == 429 {
-                QuotaBook.shared.note(model, body: text)
+                QuotaBook.shared.note(quota, body: text)
                 throw LLMError.http(code, text)
             }
 
@@ -99,6 +100,16 @@ public final class GeminiClient: @unchecked Sendable {
 
     /// Same request, streamed: `onText` gets the growing answer as Gemini writes it, so it can be shown
     /// (and spoken) before the whole reply is done. Anything unusual falls back to the plain request.
+    /// Google Search has its own allowance: a refused search pauses searching on that model, not the model itself.
+    public static func quotaKey(_ model: String, tools: [[String: Any]]) -> String {
+        tools.contains { $0["google_search"] != nil } ? model + "+search" : model
+    }
+
+    /// Whether this model can search with Google right now, as far as Jarvis knows.
+    public static func canSearch(_ model: String) -> Bool {
+        QuotaBook.shared.usable(model) && QuotaBook.shared.usable(model + "+search")
+    }
+
     public func stream(model: String, system: String, contents: [[String: Any]], tools: [[String: Any]] = [],
                        maxTokens: Int = 1024, thinking: Thinking? = nil,
                        onText: @escaping @Sendable (String) -> Void) async throws -> GeminiResponse {
@@ -109,6 +120,7 @@ public final class GeminiClient: @unchecked Sendable {
         if let thinking { gen["thinkingConfig"] = thinking.json }
         var body: [String: Any] = ["systemInstruction": ["parts": [["text": system]]], "contents": contents, "generationConfig": gen]
         if !tools.isEmpty { body["tools"] = tools }
+        let quota = Self.quotaKey(model, tools: tools)
         var req = try request("/models/\(model):streamGenerateContent?alt=sse", body: body)
         req.timeoutInterval = 120
         let (bytes, resp) = try await URLSession.shared.bytes(for: req)
@@ -117,7 +129,7 @@ public final class GeminiClient: @unchecked Sendable {
             var text = ""
             for try await line in bytes.lines { text += line; if text.count > 4000 { break } }
             if code == 429 {
-                QuotaBook.shared.note(model, body: text)
+                QuotaBook.shared.note(quota, body: text)
                 throw LLMError.http(code, text)
             }
             // Let the plain request deal with retries and settings the model doesn't take.

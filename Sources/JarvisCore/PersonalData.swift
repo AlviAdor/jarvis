@@ -394,8 +394,13 @@ public enum Files {
 public enum Web {
     /// Downloads a page and returns its readable text.
     public static func fetch(_ urlString: String) async -> String {
+        await page(urlString).text
+    }
+
+    /// A page's readable text and the address it ended up at after redirects; `ok` is false for errors.
+    public static func page(_ urlString: String) async -> (ok: Bool, url: String, text: String) {
         guard let url = URL(string: urlString), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
-            return "Only http and https links can be read."
+            return (false, urlString, "Only http and https links can be read.")
         }
         var req = URLRequest(url: url)
         req.timeoutInterval = 15
@@ -403,14 +408,25 @@ public enum Web {
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            guard code < 400 else { return "The page answered with error \(code)." }
+            let final = resp.url?.absoluteString ?? urlString
+            guard code < 400 else { return (false, final, "The page answered with error \(code).") }
             let type = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? ""
             let raw = String(decoding: data.prefix(3_000_000), as: UTF8.self)
             let text = type.contains("html") || raw.lowercased().contains("<html") ? readable(raw) : raw
-            return String(text.prefix(12_000))
+            return (true, final, String(text.prefix(12_000)))
         } catch {
-            return "Couldn't load the page: \(error.localizedDescription)"
+            return (false, urlString, "Couldn't load the page: \(error.localizedDescription)")
         }
+    }
+
+    /// Turns HTML entities back into characters.
+    public static func decodeEntities(_ s: String) -> String {
+        var out = s
+        for (k, v) in ["&nbsp;": " ", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'", "&#x27;": "'", "&apos;": "'", "&rsquo;": "'",
+                       "&lsquo;": "'", "&ldquo;": "\u{201C}", "&rdquo;": "\u{201D}", "&mdash;": "\u{2014}", "&ndash;": "\u{2013}", "&hellip;": "\u{2026}", "&#x2F;": "/"] {
+            out = out.replacingOccurrences(of: k, with: v)
+        }
+        return out.replacingOccurrences(of: "&amp;", with: "&")
     }
 
     /// Strips scripts, styles and tags, keeping the title and the visible words.

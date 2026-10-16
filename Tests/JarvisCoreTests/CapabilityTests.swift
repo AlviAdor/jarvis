@@ -412,6 +412,29 @@ final class AttachmentTests: XCTestCase {
     }
 }
 
+final class WebSearchTests: XCTestCase {
+    func testOpenWebResultsAreParsedWithoutAds() {
+        let html = """
+        <div class="result results_links results_links_deep result--ad "><a class="result__a" href="https://ads.example/x">Buy now</a></div>
+        <div class="result results_links results_links_deep web-result "><h2><a rel="nofollow" class="result__a" href="https://www.coursicle.com/blog/trackers/">Best <b>Assignment</b> Trackers</a></h2>
+        <a class="result__snippet" href="https://www.coursicle.com/blog/trackers/">Looking for the best way to track it&#x27;s due dates &amp; more</a></div>
+        <div class="result results_links results_links_deep web-result "><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fpage&rut=1">Example</a></div>
+        """
+        let hits = WebSearch.parse(html)
+        XCTAssertEqual(hits.map(\.url), ["https://www.coursicle.com/blog/trackers/", "https://example.org/page"])
+        XCTAssertEqual(hits[0].title, "Best Assignment Trackers")
+        XCTAssertEqual(hits[0].snippet, "Looking for the best way to track it's due dates & more")
+    }
+
+    func testSearchRefusalsDontBlockTheModel() {
+        XCTAssertEqual(GeminiClient.quotaKey("gemini-x-flash", tools: [["google_search": [String: Any]()]]), "gemini-x-flash+search")
+        XCTAssertEqual(GeminiClient.quotaKey("gemini-x-flash", tools: []), "gemini-x-flash")
+        QuotaBook.shared.note("gemini-test-model+search", body: #"{"error":{"message":"You exceeded your current quota"}}"#)
+        XCTAssertTrue(QuotaBook.shared.usable("gemini-test-model"))
+        XCTAssertFalse(GeminiClient.canSearch("gemini-test-model"))
+    }
+}
+
 final class ConversationFlowTests: XCTestCase {
     func testUnfinishedSentencesGetMoreTime() {
         for t in ["remind me to call mum and", "open the file with", "I want to know about,", "set a timer because um"] {

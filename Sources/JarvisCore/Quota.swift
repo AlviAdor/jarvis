@@ -70,7 +70,7 @@ public final class QuotaBook: @unchecked Sendable {
         case .perMinute: until = now.addingTimeInterval(max(5, r.retryAfter ?? 30))
         case .perDay: until = Self.nextPacificMidnight(after: now)
         case .noFreeTier: until = now.addingTimeInterval(7 * 86_400)
-        case .unknown: until = now.addingTimeInterval(max(10, r.retryAfter ?? 30))
+        case .unknown: until = now.addingTimeInterval(max(10, r.retryAfter ?? (model.hasSuffix("+search") ? 20 * 60 : 30)))
         }
         let message = (try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
             .flatMap { ($0["error"] as? [String: Any])?["message"] as? String } ?? String(body.prefix(200))

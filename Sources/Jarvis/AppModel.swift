@@ -825,7 +825,7 @@ final class AppModel: ObservableObject {
     /// Grounded Google Search through Gemini, returned as text with its sources.
     nonisolated private static func webSearch(_ q: String, key: String, settings s: JarvisSettings, usage: @escaping @Sendable (Usage) -> Void) async -> String {
         let client = GeminiClient(apiKey: key)
-        let models = ([s.flashModel] + ModelPicker.ranked(.flash, in: s.knownModels).prefix(2) + [s.liteModel]).filter { QuotaBook.shared.usable($0) }
+        let models = ([s.flashModel] + ModelPicker.ranked(.flash, in: s.knownModels).prefix(2) + [s.liteModel]).filter(GeminiClient.canSearch)
         for model in models {
             do {
                 let r = try await client.generate(model: model, system: "Search the web and answer with the key facts, figures and dates. Plain text, under 150 words.",
@@ -840,7 +840,9 @@ final class AppModel: ObservableObject {
                 continue
             }
         }
-        return "Couldn't search the web right now."
+        // Google Search is resting on this key: open web results instead, with links the assistant can read.
+        let hits = await WebSearch.duckDuckGo(q, limit: 8)
+        return hits.isEmpty ? "Couldn't search the web right now." : WebSearch.describe(hits, query: q)
     }
 
     /// Settings Jarvis may change when asked out loud.
