@@ -235,6 +235,18 @@ public enum Hearing {
         return Double(row[y.count]) <= max(1, 0.5 * Double(max(x.count, y.count)))
     }
 
+    /// Whether what the mic caught is only Jarvis's own recent speech, such as "Good afternoon" from its greeting.
+    /// Two or more words in the same order as something it said (one slip allowed in longer runs).
+    public static func isEcho(_ heard: String, of spoken: String) -> Bool {
+        let h = words(heard).map { $0.lowercased() }, s = words(spoken).map { $0.lowercased() }
+        guard h.count >= 2, h.count <= s.count else { return false }
+        for i in 0...(s.count - h.count) {
+            let misses = zip(h, s[i..<(i + h.count)]).filter { $0 != $1 }.count
+            if misses == 0 || (h.count >= 4 && misses == 1) { return true }
+        }
+        return false
+    }
+
     /// Words from a correction worth leaning towards next time.
     public static func newWords(heard: String, meant: String) -> [String] {
         let heardSet = Set(words(heard).map { $0.lowercased() })

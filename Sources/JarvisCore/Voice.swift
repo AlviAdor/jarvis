@@ -128,14 +128,18 @@ final class AudioGate: @unchecked Sendable {
         lock.lock()
         preroll.append(buffer)
         if preroll.count > 6 { preroll.removeFirst() }
-        let warm = Date().timeIntervalSince(speakingSince) > 0.4
+        let warm = Date().timeIntervalSince(speakingSince) > 0.6
         let trigger = max(threshold * 1.8, echo * 2.0, noiseFloor * 5)
         if !warm || level <= trigger {
             echo += (level - echo) * (level > echo ? 0.35 : 0.02)
         }
         bargeRun = warm && level > trigger ? bargeRun + 1 : 0
         let fire = bargeRun >= 3
-        if fire { bargeRun = 0 }
+        if fire {
+            bargeRun = 0
+            // Earlier audio is mostly Jarvis's own voice; keep only the start of what the user is saying.
+            preroll = Array(preroll.suffix(2))
+        }
         lock.unlock()
         if fire { onBargeIn?() }
     }
@@ -682,7 +686,15 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     /// Called each time a reply is sent to Gemini to be spoken, so the request is counted.
     public var onCloudUse: (() -> Void)?
 
+    /// What Jarvis said lately, so the mic catching its own voice isn't taken for a request.
+    public private(set) var recentSpeech = ""
+
+    private func noteSpoken(_ text: String) {
+        recentSpeech = String((recentSpeech + " " + text).suffix(800))
+    }
+
     public func say(_ text: String, settings s: JarvisSettings, queue: Bool = true) {
+        noteSpoken(text)
         if s.usageSaver {
             sayLocal(text, settings: s, queue: queue)
             return
@@ -758,6 +770,7 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     public func sayPart(_ text: String, settings s: JarvisSettings) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
+        noteSpoken(t)
         let gemini = s.voiceEngine == "gemini" && !s.usageSaver && !geminiKey().isEmpty && QuotaBook.shared.usable(s.ttsModel)
         let seq = pieceCount
         pieceCount += 1

@@ -113,6 +113,8 @@ final class AppModel: ObservableObject {
     private var lastHeard = ""
     private var correctingHeard: String?
     private var speechModelRecipe = ""
+    /// Listening started because something talked over Jarvis, which may have been Jarvis's own voice.
+    private var bargedIn = false
 
     /// App names recognition should know, read once.
     private static let appNames: [String] = {
@@ -219,6 +221,7 @@ final class AppModel: ObservableObject {
             // The setup chat captures the answer itself; mid-task, talking only quiets Jarvis.
             guard !self.needsOnboarding, !self.busy else { return }
             self.voice.arm()   // not a push-to-talk arm, so "only my voice" still applies
+            self.bargedIn = true
             self.phase = .listening
         }
         voice.onEnrolled = { [weak self] ok in
@@ -526,6 +529,15 @@ final class AppModel: ObservableObject {
     }
 
     private func heard(_ raw: String) {
+        // After an interruption, words that only repeat what Jarvis just said were its own voice in the mic.
+        if bargedIn {
+            bargedIn = false
+            if Hearing.isEcho(raw, of: speaker.recentSpeech) {
+                log("Ignored my own voice: \u{201C}\(raw)\u{201D}")
+                if phase == .listening { phase = .idle }
+                return
+            }
+        }
         // Words it reliably mishears, and ones the user has corrected before, are fixed first.
         let text = Hearing.correct(raw, learned: store.value.heardAs)
         if text != raw { log("Heard \u{201C}\(raw)\u{201D}, understood \u{201C}\(text)\u{201D}") }
@@ -922,7 +934,8 @@ final class AppModel: ObservableObject {
             }
         }
         remember(text, final, source: answerSource, mode: "local")
-        if !speaker.isSpeaking { phase = .idle }
+        // Still talking: show it, so the end of speech returns to idle instead of leaving "thinking" up.
+        phase = speaker.isSpeaking ? .speaking : .idle
         setWorkload(0)
         refreshOverlay()
         return .answered

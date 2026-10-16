@@ -718,6 +718,14 @@ final class HearingTests: XCTestCase {
         XCTAssertFalse(Hearing.soundsAlike("London", "Paris"))
     }
 
+    func testJarvisDoesNotTakeItsOwnVoiceForARequest() {
+        let said = "Good afternoon, Alvi. I'm here when you need me."
+        XCTAssertTrue(Hearing.isEcho("Good afternoon", of: said))
+        XCTAssertTrue(Hearing.isEcho("I'm hear when you need me", of: said))
+        XCTAssertFalse(Hearing.isEcho("stop", of: said))
+        XCTAssertFalse(Hearing.isEcho("what's the weather tomorrow", of: said))
+    }
+
     func testProfileWordsAndHintsStayFocused() {
         var s = JarvisSettings()
         s.userName = "Alvi Ador"
