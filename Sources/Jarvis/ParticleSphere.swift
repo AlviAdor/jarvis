@@ -158,7 +158,9 @@ final class SphereRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         // Frame rate follows attention: smooth while Jarvis is active, gentle at rest, slower still in the background.
         let resting = idle && intensity < 0.05
-        let fps = resting ? (view.window?.isKeyWindow == true ? 30 : 15) : 60
+        // ProMotion screens get their full 120 Hz while Jarvis is active; at rest it stays low to save power.
+        let top = view.window?.screen?.maximumFramesPerSecond ?? 60
+        let fps = resting ? (view.window?.isKeyWindow == true ? 30 : 15) : max(60, top)
         if view.preferredFramesPerSecond != fps { view.preferredFramesPerSecond = fps }
         let now = CACurrentMediaTime()
         let dt = Float(min(now - last, 0.1))

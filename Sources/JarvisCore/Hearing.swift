@@ -237,8 +237,13 @@ public enum Hearing {
 
     /// Whether what the mic caught is only Jarvis's own recent speech, such as "Good afternoon" from its greeting.
     /// Two or more words in the same order as something it said (one slip allowed in longer runs).
-    public static func isEcho(_ heard: String, of spoken: String) -> Bool {
+    /// With `justSpoke` (heard while Jarvis was talking or a moment after), a single repeated word counts too,
+    /// except replies a person gives right after a question.
+    public static func isEcho(_ heard: String, of spoken: String, justSpoke: Bool = false) -> Bool {
         let h = words(heard).map { $0.lowercased() }, s = words(spoken).map { $0.lowercased() }
+        if justSpoke, h.count == 1, let w = h.first, w.count >= 4, !replies.contains(w) {
+            return s.suffix(40).contains(w)
+        }
         guard h.count >= 2, h.count <= s.count else { return false }
         for i in 0...(s.count - h.count) {
             let misses = zip(h, s[i..<(i + h.count)]).filter { $0 != $1 }.count
@@ -246,6 +251,9 @@ public enum Hearing {
         }
         return false
     }
+
+    static let replies: Set<String> = ["yes", "yeah", "yep", "sure", "okay", "stop", "cancel", "wait", "please", "thanks",
+                                       "thank", "nope", "allow", "continue", "again", "pause", "quiet", "enough"]
 
     /// Words from a correction worth leaning towards next time.
     public static func newWords(heard: String, meant: String) -> [String] {

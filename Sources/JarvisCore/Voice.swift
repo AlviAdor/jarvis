@@ -668,6 +668,19 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     public var knownModels: () -> [String] = { [] }
 
     public var isSpeaking: Bool { synth.isSpeaking || (player?.isPlaying ?? false) || fetch != nil || nextPiece < pieceCount }
+    /// Sound is coming out, or about to (a voice is being fetched, or a part of the answer is on its way).
+    public var isAudible: Bool {
+        synth.isSpeaking || (player?.isPlaying ?? false) || fetch != nil || !pieces.isEmpty || pendingParts > 0
+    }
+
+    /// Clears a queue left in a stale state (a part that never arrived) without cutting off real speech.
+    public func settle() {
+        guard !isAudible else { return }
+        pieces = [:]
+        nextPiece = 0
+        pieceCount = 0
+        partTasks = []
+    }
 
     // Speaking while the answer is still arriving.
     private enum Piece { case audio(Data), text(String) }
@@ -676,6 +689,7 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     private var pieceCount = 0
     private var partTasks: [Task<Void, Never>] = []
     private var partSettings: JarvisSettings?
+    private var pendingParts = 0
 
     public override init() {
         super.init()
@@ -789,9 +803,12 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         }
         onCloudUse?()
         let key = geminiKey(), known = knownModels()
+        pendingParts += 1
         partTasks.append(Task { [weak self] in
             let wav = try? await GeminiVoice.synthesize(t, voice: s.geminiVoice, style: s.voiceStyle, model: s.ttsModel, key: key, known: known)
-            guard let self, !Task.isCancelled else { return }
+            guard let self else { return }
+            self.pendingParts = max(0, self.pendingParts - 1)
+            guard !Task.isCancelled else { return }
             if let wav, let cached { try? wav.write(to: cached, options: .atomic) }
             self.pieces[seq] = wav.map { .audio($0) } ?? .text(t)
             self.playNextPiece()
@@ -816,6 +833,7 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     public func stop() {
         partTasks.forEach { $0.cancel() }
         partTasks = []
+        pendingParts = 0
         pieces = [:]
         nextPiece = 0
         pieceCount = 0

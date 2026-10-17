@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     let usage = UsageTracker()
     let voice = VoiceEngine()
     let memory = MemoryStore()
+    let experience = ExperienceLog()
     let speaker = Speaker()
     let telemetry = Telemetry()
     private lazy var scheduler = Scheduler(memory: memory)
@@ -52,6 +53,7 @@ final class AppModel: ObservableObject {
     @Published var answer = ""
     @Published var answerSource = ""
     @Published var steps: [Step] = []
+    @Published var lessons: [Lesson] = []
     @Published var history: [Exchange] = []
     @Published var notice: String?
     /// A button on the notice, such as Undo.
@@ -144,7 +146,9 @@ final class AppModel: ObservableObject {
     private var hudWasVisible = false
 
     var needsOnboarding: Bool { !termsAccepted || !onboarded }
-    var still: Bool { store.value.reduceMotion || !windowVisible }
+    @Published var windowFocused = false
+    /// The orb only moves when someone could be watching it: hidden, or idle behind other apps, it rests.
+    var still: Bool { store.value.reduceMotion || !windowVisible || (!windowFocused && phase == .idle && !quickActive) }
     var busy: Bool { phase == .thinking || phase == .acting }
     private var bundled: Bool { Bundle.main.bundleURL.pathExtension == "app" }
     private var wantsTelemetry: Bool { store.value.showTelemetry && (windowVisible || quickActive) && !needsOnboarding }
@@ -235,10 +239,13 @@ final class AppModel: ObservableObject {
         speaker.geminiKey = { [weak self] in self?.store.geminiKey ?? "" }
         speaker.onSpeakingChange = { [weak self] speaking in
             guard let self else { return }
+            if self.speaking && !speaking { self.lastSpeechEnd = Date() }
             self.speaking = speaking
             self.voice.suspended = speaking
             if speaking, self.phase == .idle { self.phase = .speaking }
             if !speaking, self.phase == .speaking { self.phase = .idle }
+            if speaking { self.watchSpeech() }
+            self.refreshOverlay()
         }
         speaker.knownModels = { [weak self] in self?.store.value.knownModels ?? [] }
         speaker.onCloudUse = { [weak self] in self?.usage.add(Usage()) }
@@ -271,6 +278,10 @@ final class AppModel: ObservableObject {
             }
         }
         facts = memory.facts
+        lessons = experience.lessons
+        experience.onChange = { [weak self] in
+            Task { @MainActor in self?.lessons = self?.experience.lessons ?? [] }
+        }
         automations = memory.automations
         about = memory.about
         HotKey.action = { [weak self] in self?.hotkeyPressed() }
@@ -531,9 +542,11 @@ final class AppModel: ObservableObject {
 
     private func heard(_ raw: String) {
         // After an interruption, words that only repeat what Jarvis just said were its own voice in the mic.
-        if bargedIn {
+        // Also while Jarvis is talking or just finished: its own greeting must not come back as a request.
+        let justSpoke = speaking || Date().timeIntervalSince(lastSpeechEnd) < 4
+        if bargedIn || justSpoke {
             bargedIn = false
-            if Hearing.isEcho(raw, of: speaker.recentSpeech) {
+            if Hearing.isEcho(raw, of: speaker.recentSpeech, justSpoke: justSpoke) {
                 log("Ignored my own voice: \u{201C}\(raw)\u{201D}")
                 if phase == .listening { phase = .idle }
                 return
@@ -654,7 +667,7 @@ final class AppModel: ObservableObject {
 
     // MARK: Pipeline
 
-    private func handle(_ text: String, files: [Attachment] = [], spoken: Bool = false) async {
+    private func handle(_ text: String, files: [Attachment] = [], spoken: Bool = false, attempt: Int = 0) async {
         guard termsAccepted else { showWindow(); return }
         let began = Date()
         phase = .thinking
@@ -777,7 +790,7 @@ final class AppModel: ObservableObject {
                     }
                 }
                 (outcome, provider) = try await runAgent(text, files: files, mode: m, tier: override ?? deep ?? router.tier(for: m, settings: s),
-                                                         chain: router.chain(for: m, settings: s, from: override ?? deep),
+                                                         chain: experience.reorder(router.chain(for: m, settings: s, from: override ?? deep)),
                                                          client: client, tools: tools, settings: s, log: logger)
                 // The model decided this needs the screen: run it again with eyes and hands.
                 if outcome.needsScreen, !handedToScreen, !KillSwitch.shared.tripped {
@@ -798,6 +811,33 @@ final class AppModel: ObservableObject {
                 }
                 break
             }
+            // Check the real result before claiming success; one corrective attempt if the check fails.
+            var verified: Bool?
+            if outcome.success, s.verifyTasks, !KillSwitch.shared.tripped,
+               Verifier.needsCheck(mode: m, stepTitles: steps.map(\.title)) {
+                var verdict = await verify(text, claim: outcome.summary, mode: m)
+                if let v = verdict, !v.done, !KillSwitch.shared.tripped {
+                    if let lesson = v.lesson, s.learnFromExperience { experience.learn(lesson, about: text) }
+                    apply(ActionEvent(title: "Fixing what the check found", detail: v.reason, state: .done, icon: "wrench.and.screwdriver"))
+                    let retryTask = text + "\n\nA previous attempt said it was done, but a check found: \(v.reason) Fix this and finish the task properly, then confirm."
+                    (outcome, provider) = try await runAgent(retryTask, files: files, mode: m, tier: router.escalation(from: m, settings: s) ?? router.tier(for: m, settings: s),
+                                                             chain: experience.reorder(router.chain(for: m, settings: s, from: router.escalation(from: m, settings: s))),
+                                                             client: client, tools: makeTools(s, mcp: mcpTools, hint: text), settings: s, log: logger)
+                    verdict = outcome.success ? await verify(text, claim: outcome.summary, mode: m) : verdict
+                    if let v2 = verdict, v2.done, s.learnFromExperience {
+                        experience.learn("For tasks like \"\(text.prefix(80))\": \(v.reason) Checking the result and correcting it worked.", about: text)
+                    }
+                }
+                verified = verdict?.done
+                if let v = verdict, !v.done {
+                    outcome = AgentOutcome(success: false, summary: "I tried, but I couldn't confirm it worked: \(v.reason)")
+                }
+            }
+            if s.learnFromExperience {
+                experience.record(Episode(date: Date(), task: String(text.prefix(200)), mode: m.rawValue, provider: provider,
+                                          success: outcome.success, verified: verified, error: nil, steps: steps.count,
+                                          seconds: Date().timeIntervalSince(began)))
+            }
             var answerText = outcome.summary
             var said = files.isEmpty ? text : text + " " + files.map(\.mention).joined(separator: " ")
             if spoken {
@@ -810,14 +850,71 @@ final class AppModel: ObservableObject {
         } catch is CancellationError {
             phase = .idle
         } catch {
-            // The cloud failed (offline, limits, an outage): answer on this Mac rather than leave you waiting.
-            if !spoken, files.isEmpty, mode != .screen, await answerLocally(text, began: began, solo: true) == .answered {
-                log("Cloud failed, answered on this Mac: \(Friendly.message(error))")
-            } else {
-                reply(Friendly.message(error))
+            let kind = ErrorKind.of(error)
+            if s.learnFromExperience {
+                if [.server, .timeout, .modelMissing].contains(kind), let first = router.chain(for: mode ?? .chat, settings: s).first {
+                    experience.noteFailure(model: first)
+                }
+                experience.record(Episode(date: Date(), task: String(text.prefix(200)), mode: (mode ?? .chat).rawValue, provider: "",
+                                          success: false, verified: nil, error: kind, steps: steps.count, seconds: Date().timeIntervalSince(began)))
+            }
+            switch Recovery.plan(kind, attempt: attempt) {
+            case .retry(let after) where steps.isEmpty && mode != .screen:
+                // Nothing was done yet, so trying again is safe.
+                log("\(kind.rawValue) error, retrying: \(Friendly.message(error))")
+                try? await Task.sleep(nanoseconds: UInt64(after * 1_000_000_000))
+                if !Task.isCancelled { await handle(text, files: files, spoken: spoken, attempt: attempt + 1) }
+                return
+            case .tellUser(let what):
+                reply(what + " (" + Friendly.message(error) + ")")
+            default:
+                // The cloud failed (offline, limits, an outage): answer on this Mac rather than leave you waiting.
+                if !spoken, files.isEmpty, mode != .screen, await answerLocally(text, began: began, solo: true) == .answered {
+                    log("Cloud failed, answered on this Mac: \(Friendly.message(error))")
+                } else {
+                    reply(Friendly.message(error))
+                }
             }
         }
         comeBack()
+    }
+
+    /// What every agent knows going in: who you are, plus lessons from past tasks like this one.
+    private func agentProfile(_ task: String, _ s: JarvisSettings) -> String {
+        let base = memory.profile(name: s.userName)
+        guard s.learnFromExperience else { return base }
+        let lessons = experience.context(for: task)
+        return lessons.isEmpty ? base : (base.isEmpty ? lessons : base + "\n" + lessons)
+    }
+
+    /// Looks at the real result (a fresh screenshot for screen work, the step log for the rest) and judges it.
+    private func verify(_ task: String, claim: String, mode: Mode) async -> Verifier.Verdict? {
+        let id = UUID()
+        apply(ActionEvent(id: id, title: "Checking the result", state: .running, icon: "checkmark.shield"))
+        var shot: Shot?
+        var map: String?
+        if mode == .screen {
+            try? await Task.sleep(nanoseconds: 600_000_000)   // let the last action settle
+            if let sh = try? await Screen.capture() {
+                shot = sh
+                let size = NSScreen.main?.frame.size ?? CGSize(width: 1440, height: 900)
+                map = ScreenReader.describe(sh, screen: size)
+            }
+        }
+        let log = steps.filter { $0.id != id }.map { (title: $0.title, detail: $0.detail, failed: $0.state == .failed) }
+        let s = store.value
+        let models = Hearing.unique([s.flashModel, s.liteModel]).filter { QuotaBook.shared.usable($0) }
+        let v = await Verifier.check(task: task, claim: claim, steps: log, screenshot: shot, screenMap: map,
+                                     key: store.geminiKey, models: models.isEmpty ? [s.liteModel] : models)
+        switch v {
+        case .some(let v) where v.done:
+            apply(ActionEvent(id: id, title: "Checked: it worked", detail: v.reason.isEmpty ? nil : v.reason, state: .done, icon: "checkmark.shield"))
+        case .some(let v):
+            apply(ActionEvent(id: id, title: "Check found a problem", detail: v.reason, state: .failed, icon: "exclamationmark.shield"))
+        case .none:
+            apply(ActionEvent(id: id, title: "Couldn't run the check", state: .done, icon: "shield.slash"))
+        }
+        return v
     }
 
     private func makeTools(_ s: JarvisSettings, mcp: [MCPTool], hint: String = "") -> ToolBox {
@@ -1039,7 +1136,7 @@ final class AppModel: ObservableObject {
         if s.claudeEnabled, !store.claudeKey.isEmpty, mode != .web, !files.contains(where: \.needsGemini), Date() >= claudeBlockedUntil {
             let model = s.claudeModelID(tier)
             let agent = ClaudeAgent(client: ClaudeClient(apiKey: store.claudeKey), model: model, settings: s,
-                                    tools: tools, tracker: usage, profile: memory.profile(name: s.userName), log: logger)
+                                    tools: tools, tracker: usage, profile: agentProfile(text, s), log: logger)
             do {
                 return (try await agent.run(task: text, mode: mode, history: chatHistory(), attachments: files), "Claude")
             } catch is CancellationError {
@@ -1060,7 +1157,7 @@ final class AppModel: ObservableObject {
         // Screen work: Gemini's built-in computer use first; the screenshot-and-tools loop if it isn't available.
         if mode == .screen, s.computerUse, let cu = ComputerUseAgent.pick(s) {
             let agent = ComputerUseAgent(key: store.geminiKey, model: cu, settings: s, tools: tools, tracker: usage,
-                                         profile: memory.profile(name: s.userName), log: logger)
+                                         profile: agentProfile(text, s), log: logger)
             do {
                 return (try await agent.run(task: text, history: chatHistory()), "Gemini computer use")
             } catch is CancellationError {
@@ -1073,7 +1170,7 @@ final class AppModel: ObservableObject {
             }
         }
         let agent = GeminiAgent(client: client, chain: chain, settings: s, tools: tools, tracker: usage,
-                                profile: memory.profile(name: s.userName), log: logger)
+                                profile: agentProfile(text, s), log: logger)
         agent.onText = { [weak self] t in Task { @MainActor in self?.streamed(t, mode: mode) } }
         return (try await agent.run(task: text, mode: mode, history: chatHistory(), attachments: files), "Gemini")
     }
@@ -1240,8 +1337,62 @@ final class AppModel: ObservableObject {
         alert.informativeText = question
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Cancel")
+        // The prompt needs focus, but the task is happening in another app: remember it so it can be handed back.
+        let me = ProcessInfo.processInfo.processIdentifier
+        let previous = NSWorkspace.shared.frontmostApplication.flatMap { $0.processIdentifier == me ? nil : $0 }
         NSApp.activate(ignoringOtherApps: true)
-        return alert.runModal() == .alertFirstButtonReturn
+        let allowed = alert.runModal() == .alertFirstButtonReturn
+        await restoreFocus(to: previous)
+        return allowed
+    }
+
+    private var speechWatch: Task<Void, Never>?
+    private var lastSpeechEnd = Date.distantPast
+
+    /// The "finished speaking" signal can go missing (an utterance replaced mid-word, a streamed part dropped).
+    /// Without it Jarvis would stay deaf and its orb would race. While speaking, check once a second that
+    /// audio is really playing, and recover if it isn't.
+    private func watchSpeech() {
+        guard speechWatch == nil else { return }
+        speechWatch = Task { [weak self] in
+            var silentFor = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self else { return }
+                guard self.speaking || self.phase == .speaking else { break }
+                silentFor = self.speaker.isAudible ? 0 : silentFor + 1
+                if silentFor >= 2 {
+                    self.log("Speech ended without a signal; back to listening")
+                    self.speaker.settle()
+                    self.speaking = false
+                    self.lastSpeechEnd = Date()
+                    self.voice.suspended = false
+                    if self.phase == .speaking { self.phase = .idle }
+                    break
+                }
+            }
+            self?.speechWatch = nil
+        }
+    }
+
+    /// Gives focus back to the app Jarvis was working in, and waits until macOS has really switched,
+    /// so the next keystroke or click lands there instead of in Jarvis.
+    private func restoreFocus(to app: NSRunningApplication?) async {
+        guard let app, !app.isTerminated else { return }
+        let me = ProcessInfo.processInfo.processIdentifier
+        // Jarvis's own windows must not take the keystrokes either.
+        NSApp.windows.filter { $0.isKeyWindow && !($0 is NSPanel) }.forEach { $0.resignKey() }
+        for attempt in 0..<40 {   // up to about 2 seconds
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier { break }
+            if attempt % 10 == 0 {
+                if attempt >= 10 { NSApp.hide(nil) }   // stubborn case: step out of the way entirely
+                app.activate()
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        // The app is in front; give its window a moment to become key and restore the text cursor.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == me { log("Couldn't hand focus back to \(app.localizedName ?? "the app")") }
     }
 
     private func notify(_ title: String, _ body: String) {
@@ -1582,15 +1733,26 @@ final class AppModel: ObservableObject {
         let hudFront = NSApp?.windows.contains { $0.identifier?.rawValue.contains("hud") == true && $0.isKeyWindow && $0.isVisible } ?? false
         if quickActive { overlayVisible = true; return }
         guard store.value.overlayEnabled, !hudFront else { overlayVisible = false; return }
-        if phase != .idle {
+        // Stays while Jarvis is working or talking (speech can begin before the phase says so).
+        if phase != .idle || speaking {
             overlayVisible = true
         } else {
-            guard !overlayHovered else { return }
+            guard !overlayHovered, overlayVisible else { return }
+            let delay = Self.readingTime(overlayText, spoken: lastSpeechEnd.timeIntervalSinceNow > -2)
             hideTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
-                if !Task.isCancelled, self?.quickActive == false, self?.overlayHovered == false { self?.overlayVisible = false }
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, !Task.isCancelled, !self.quickActive, !self.overlayHovered, !self.speaking, self.phase == .idle else { return }
+                self.overlayVisible = false
             }
         }
+    }
+
+    /// How long the popup stays after Jarvis finishes: long enough to read what it shows (about four words
+    /// a second), shorter when you just heard it spoken, never under 4 or over 20 seconds.
+    static func readingTime(_ text: String, spoken: Bool) -> Double {
+        let words = Double(text.split { $0 == " " || $0 == "\n" }.count)
+        let read = words / 4.0
+        return min(20, max(4, spoken ? 2.5 + read * 0.4 : 2 + read))
     }
 
     /// Esc anywhere stops whatever Jarvis is doing. Jarvis's own key presses carry a marker and are ignored.

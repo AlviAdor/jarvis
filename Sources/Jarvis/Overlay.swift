@@ -9,16 +9,19 @@ private struct QuickView: View {
     @EnvironmentObject var model: AppModel
     @FocusState private var focused: Bool
     @State private var hover = false
+    @ObservedObject var notch: NotchState
 
     var body: some View {
         // Nothing to draw or update while the bar is hidden.
-        if model.overlayVisible || model.quickActive { content } else { Color.clear.frame(width: 1, height: 1) }
+        // Kept on screen through the retract animation; nothing is drawn once it is tucked away.
+        if notch.mounted { content } else { Color.clear.frame(width: 1, height: 1) }
     }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 14) {
-                LiveOrb(voice: model.voice, phase: model.phase, accent: model.accent, still: model.store.value.reduceMotion)
+                LiveOrb(voice: model.voice, phase: model.phase, accent: model.accent,
+                        still: model.store.value.reduceMotion || (model.phase == .idle && !model.quickActive && !hover))
                     .frame(width: 54, height: 54)
                 VStack(alignment: .leading, spacing: 4) {
                     MicroLabel(text: label, color: model.accent)
@@ -66,17 +69,21 @@ private struct QuickView: View {
                 .onAppear { focused = true }
             }
         }
-        .padding(16)
+        .padding(.horizontal, 18 + NotchShape.ear)
+        .padding(.top, NotchMetrics.height + 8)      // content starts below the camera housing
+        .padding(.bottom, 16)
         .frame(width: 600)
-        .glassCard(26)
+        .modifier(NotchGlass())
+        .overlay(NotchShape().stroke(model.accent.opacity(model.busy ? 0.55 : 0.25), lineWidth: 1))
+        // Grows out of the notch, the way the system's own notch alerts do.
+        .scaleEffect(x: notch.open ? 1 : NotchMetrics.width / 600, y: notch.open ? 1 : 0.2, anchor: .top)
+        .opacity(notch.open ? 1 : 0)
         .onHover { h in
             withAnimation(.easeOut(duration: 0.15)) { hover = h }
             model.overlayHovered = h
         }
-        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(model.accent.opacity(0.4), lineWidth: 1))
         .preferredColorScheme(model.colorScheme)
         .tint(model.accent)
-        .padding(10)   // room for the shadow
     }
 
     /// What you can do with what the bubble is showing.
@@ -129,10 +136,12 @@ final class OverlayController {
     private let host: NSHostingController<AnyView>
     private var bag = Set<AnyCancellable>()
     private weak var model: AppModel?
+    private let notch = NotchState()
+    private var hideWork: DispatchWorkItem?
 
     init(model: AppModel) {
         self.model = model
-        host = NSHostingController(rootView: AnyView(QuickView().environmentObject(model)))
+        host = NSHostingController(rootView: AnyView(QuickView(notch: notch).environmentObject(model)))
         host.sizingOptions = [.preferredContentSize]
         host.view.wantsLayer = true
         host.view.layer?.backgroundColor = .clear
@@ -140,7 +149,7 @@ final class OverlayController {
                            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView], backing: .buffered, defer: true)
         panel.contentViewController = host
         panel.isFloatingPanel = true
-        panel.level = .statusBar
+        panel.level = .statusBar + 1   // over the menu bar, where the notch lives
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
@@ -165,7 +174,10 @@ final class OverlayController {
                 self.panel.makeKey()
             }
         }.store(in: &bag)
+        // The panel resizes itself to its content during layout. Moving it from inside that pass makes AppKit
+        // re-run constraints until it gives up and throws, so the move waits for the pass to finish.
         NotificationCenter.default.publisher(for: NSWindow.didResizeNotification, object: panel)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.place() }
             .store(in: &bag)
         NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification, object: panel)
@@ -176,27 +188,99 @@ final class OverlayController {
             .store(in: &bag)
     }
 
-    /// Top centre of the screen with the pointer, just under the menu bar.
+    /// Flush with the top edge, centred on the notch of the screen with the pointer.
     private func place() {
         guard panel.frame.width > 10 else { return }
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main else { return }
-        let f = screen.visibleFrame
+        let f = screen.frame
         let size = panel.frame.size
-        panel.setFrameOrigin(NSPoint(x: f.midX - size.width / 2, y: f.maxY - size.height - 8))
+        panel.setFrameOrigin(NSPoint(x: f.midX - size.width / 2, y: f.maxY - size.height))
     }
 
     private func show() {
+        hideWork?.cancel()
         place()
         if !panel.isVisible {
-            panel.alphaValue = 0
+            panel.alphaValue = 1
             panel.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { $0.duration = 0.18; panel.animator().alphaValue = 1 }
+        }
+        notch.mounted = true
+        // Next frame, so it starts tucked in the notch and drops down from there.
+        DispatchQueue.main.async { [notch] in
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.76)) { notch.open = true }
         }
     }
 
     private func hide() {
-        NSAnimationContext.runAnimationGroup({ $0.duration = 0.35; panel.animator().alphaValue = 0 },
-                                             completionHandler: { [panel] in if panel.alphaValue == 0 { panel.orderOut(nil) } })
+        guard notch.mounted else { return }
+        // Retract back into the notch, then take the panel away.
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { notch.open = false }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.notch.open else { return }
+            self.notch.mounted = false
+            self.panel.orderOut(nil)
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.38, execute: work)
+    }
+}
+
+
+/// Size of the screen's notch, or of the menu bar on Macs without one.
+enum NotchMetrics {
+    static var screen: NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+    }
+
+    static var height: CGFloat {
+        guard let s = screen else { return 32 }
+        if s.safeAreaInsets.top > 0 { return s.safeAreaInsets.top }
+        return max(24, s.frame.maxY - s.visibleFrame.maxY)
+    }
+
+    static var width: CGFloat {
+        guard let s = screen, let l = s.auxiliaryTopLeftArea, let r = s.auxiliaryTopRightArea else { return 200 }
+        return max(160, s.frame.width - l.width - r.width)
+    }
+}
+
+/// The notch silhouette: hangs from the top edge, flares into it at the shoulders, rounded at the bottom.
+struct NotchShape: Shape {
+    static let ear: CGFloat = 10
+    var radius: CGFloat = 24
+
+    func path(in r: CGRect) -> Path {
+        let e = Self.ear
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX, y: r.minY))
+        p.addQuadCurve(to: CGPoint(x: r.minX + e, y: r.minY + e), control: CGPoint(x: r.minX + e, y: r.minY))
+        p.addLine(to: CGPoint(x: r.minX + e, y: r.maxY - radius))
+        p.addQuadCurve(to: CGPoint(x: r.minX + e + radius, y: r.maxY), control: CGPoint(x: r.minX + e, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.maxX - e - radius, y: r.maxY))
+        p.addQuadCurve(to: CGPoint(x: r.maxX - e, y: r.maxY - radius), control: CGPoint(x: r.maxX - e, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.maxX - e, y: r.minY + e))
+        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY), control: CGPoint(x: r.maxX - e, y: r.minY))
+        p.closeSubpath()
+        return p
+    }
+}
+
+/// Whether the notch popup is dropped down, and whether it is on screen at all (it stays mounted while retracting).
+@MainActor
+final class NotchState: ObservableObject {
+    @Published var open = false
+    @Published var mounted = false
+}
+
+/// Liquid Glass in the notch's silhouette (frosted material before macOS 26).
+struct NotchGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: NotchShape())
+        } else {
+            content.background(.ultraThinMaterial, in: NotchShape()).clipShape(NotchShape())
+        }
     }
 }

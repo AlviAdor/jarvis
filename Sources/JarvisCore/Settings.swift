@@ -106,6 +106,8 @@ public struct JarvisSettings: Codable, Equatable {
     // Memory
     public var rememberConversations = true   // keep the conversation across launches
     public var learnAboutMe = true            // note lasting facts about the user from conversations
+    public var verifyTasks = true             // check the real result before saying a task is done
+    public var learnFromExperience = true     // keep lessons from past tasks and use them next time
     // App
     public var showInDock = true
     public var openWindowAtLaunch = true

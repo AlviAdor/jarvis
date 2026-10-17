@@ -574,8 +574,48 @@ private struct MemoryTab: View {
             } footer: {
                 Hint("Stored on this Mac only and sent with your requests so Jarvis can personalise its answers.")
             }
+            ExperienceSection()
         }
         .formStyle(.grouped)
+    }
+}
+
+/// How Jarvis checks its work and what it has learned from past tasks.
+private struct ExperienceSection: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Section {
+            Toggle("Check the result before saying a task is done", isOn: bind(model, \.verifyTasks))
+            Toggle("Learn from past tasks", isOn: bind(model, \.learnFromExperience))
+            let st = model.experience.stats
+            if st.tasks > 0 {
+                LabeledContent("Last \(st.tasks) tasks",
+                               value: "\(st.succeeded) succeeded · \(st.verified) of \(st.checked) checked and confirmed")
+            }
+            if model.lessons.isEmpty {
+                Text("No lessons yet. When a check finds a problem and Jarvis fixes it, the fix is saved here.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(model.lessons.sorted { $0.learned > $1.learned }) { l in
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l.text)
+                        Text("Used \(l.uses) time\(l.uses == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(role: .destructive) { model.experience.forget(l.id) } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                }
+            }
+            if !model.lessons.isEmpty || st.tasks > 0 {
+                Button("Forget everything Jarvis learned", role: .destructive) { model.experience.forgetAll() }
+            }
+        } header: {
+            Text("Learning from experience")
+        } footer: {
+            Hint("After Jarvis acts (clicks, types, runs commands, edits files), a separate check looks at the real result, using a fresh screenshot for screen tasks and the command output for the rest. If something's wrong, Jarvis fixes it once and checks again, and only then says it's done. What it learns stays on this Mac.")
+        }
     }
 }
 

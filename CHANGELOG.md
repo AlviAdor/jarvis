@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.15.0
+**Checks its own work**
+- After Jarvis acts (clicks, types, runs commands, edits files), a separate check looks at the real result: a fresh screenshot for screen tasks, the steps and command output for everything else
+- If the check finds a problem, Jarvis fixes it once on a stronger model and checks again. It only says it's done when the check passes; otherwise it says what didn't work
+- The check shows up in the activity list as "Checking the result"
+
+**Learns from experience**
+- Problems the check found, and what fixed them, become short lessons kept on this Mac and given to similar tasks later
+- Models that keep failing are tried last for an hour
+- See, delete or wipe lessons, and the recent track record, in Settings › Memory › Learning from experience
+
+**Handles errors better**
+- Every failure is sorted (offline, timeout, rate limit, missing model, bad key, permission, refusal) and gets its own recovery: a safe retry when nothing was done yet, the next model, an answer on this Mac, or a plain instruction for what you need to fix
+
+**Fixes**
+- After you approve a step, focus goes back to the app Jarvis was working in, so its typing no longer lands in Jarvis
+- Jarvis no longer hears its own greeting ("Good morning") and answers itself at launch
+- Jarvis no longer gets stuck "speaking" (deaf, with the orb racing) when the end of speech goes unreported
+- Fixed a crash when Jarvis read its own window during a screen task, and a crash from the floating bar resizing during layout
+- Idle CPU in the background drops from about 14% to under 1%: the orb rests when nobody can see it
+
+**Look**
+- The popup is shaped like the notch, in Liquid Glass: it drops down from the notch and retracts back into it
+- It stays as long as it takes to read what it shows (4 to 20 seconds), waits while Jarvis is still talking, and stays while you hover
+- ProMotion displays get smooth 120 Hz animation while Jarvis is active
+
 ## 0.14.0
 **Research**
 - Say "research…", "do a deep dive into…", "write me a report on…", or turn on the new Research switch: Jarvis plans several searches, runs them at the same time, reads the best sources in full and writes a cited brief with a bottom line, key findings and where sources disagree

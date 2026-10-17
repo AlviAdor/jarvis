@@ -117,6 +117,7 @@ final class OrbLayerView: NSView {
         p.autoreverses = true
         p.repeatCount = .infinity
         p.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        p.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)   // smooth on ProMotion
         p.isRemovedOnCompletion = false
         pulseLayer.add(p, forKey: "pulse")
         let g = CABasicAnimation(keyPath: "shadowRadius")
@@ -147,6 +148,7 @@ final class OrbLayerView: NSView {
         a.toValue = clockwise ? -2 * Double.pi : 2 * Double.pi
         a.duration = seconds
         a.repeatCount = .infinity
+        a.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)   // smooth on ProMotion
         a.isRemovedOnCompletion = false
         layer.add(a, forKey: "spin")
     }

@@ -31,6 +31,21 @@ struct RootView: View {
             guard let w = note.object as? NSWindow, w.identifier?.rawValue.contains("hud") == true else { return }
             model.windowVisible = w.occlusionState.contains(.visible) && w.isVisible
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            guard let w = note.object as? NSWindow, w.identifier?.rawValue.contains("hud") == true else { return }
+            model.windowFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { note in
+            guard let w = note.object as? NSWindow, w.identifier?.rawValue.contains("hud") == true else { return }
+            model.windowFocused = false
+        }
+        // Switching to another app doesn't always resign the window first, so watch the app too.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            model.windowFocused = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.windowFocused = NSApp.windows.contains { $0.identifier?.rawValue.contains("hud") == true && $0.isKeyWindow }
+        }
     }
 }
 

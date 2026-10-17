@@ -39,6 +39,9 @@ public enum ScreenReader {
     /// Lines like `button "Send" @ 812,940`, limited so a step stays cheap.
     public static func controls(screen: CGSize, limit: Int = 70) -> [String] {
         guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication else { return [] }
+        // Never walk Jarvis's own windows: SwiftUI's accessibility tree may only be read on the main thread,
+        // and this runs in the background. There is nothing to act on there anyway.
+        guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return [] }
         let root = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(root, 0.4)
         let bounds = CGRect(origin: .zero, size: screen)
